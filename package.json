@@ -1,0 +1,23 @@
+{
+  "name": "fortune-llm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Anthropic-Messages-API-compatible gateway. Routes to Cloudflare Workers AI by default; falls back to real Anthropic when a request needs capabilities OSS models can't deliver (tool use, vision, very long context).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.99.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

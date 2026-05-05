@@ -1,0 +1,20 @@
+name = "fortune-llm"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Default model used by the Workers AI path. Override per-deploy with the
+# DEFAULT_OSS_MODEL env var if you want to A/B another OSS model.
+[vars]
+DEFAULT_OSS_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+# Route long-context / tool-using requests to Anthropic. The two secrets
+# below are set with `wrangler secret put`.
+#   wrangler secret put ANTHROPIC_API_KEY     # your real Anthropic key
+#   wrangler secret put GATEWAY_TOKEN         # the token consumer apps send
+
+[ai]
+binding = "AI"
+
+[observability]
+enabled = true
