@@ -66,29 +66,51 @@ x-fortune-llm-reason:   why this request landed where it did
 ## Deploy
 
 You need a Cloudflare account with Workers (free) and Workers AI (free
-tier covers ~10k neurons/day). Then:
+tier covers ~10k neurons/day). All commands below are wrapped as npm
+scripts so you don't have to put `wrangler` on your PATH or remember
+the `npx` prefix.
 
-```bash
+Run these one at a time (so the `#` lines stay as comments and don't
+get fed to your shell):
+
+```
 npm install
-npm run typecheck
-npm test                                            # 24 unit tests, ~250ms
-
-# 1. Set the gateway token consumer apps will send. Generate any random string.
-wrangler secret put GATEWAY_TOKEN
-
-# 2. (optional but recommended) Set your real Anthropic key — used as the
-#    paid fallback for tool-use, vision, long context, and Workers AI outages.
-wrangler secret put ANTHROPIC_API_KEY
-
-# 3. Deploy.
-wrangler deploy
 ```
 
-Wrangler prints a `https://fortune-llm.<account>.workers.dev` URL. That's
-the value to put in each consumer app's `ANTHROPIC_BASE_URL`.
+```
+npm test
+```
+
+```
+# log in once — opens your browser, links wrangler to your CF account
+npm run login
+```
+
+```
+# the secret consumer apps will send as their "Anthropic key" — generate
+# any random string at the prompt and save it somewhere
+npm run secret:set:token
+```
+
+```
+# (optional but recommended) your real Anthropic key — used as the paid
+# fallback for tool-use, vision, long context, and Workers AI outages
+npm run secret:set:anthropic
+```
+
+```
+npm run deploy
+```
+
+Wrangler prints `https://fortune-llm.<account>.workers.dev`. Paste that
+into each consumer app's `ANTHROPIC_BASE_URL`, and the gateway token
+into `ANTHROPIC_API_KEY`.
+
+`npm run tail` streams live logs once you're deployed — useful while
+flipping the first consumer app over.
 
 To swap the OSS model later, edit `wrangler.toml` (`DEFAULT_OSS_MODEL`)
-or set it via `wrangler secret put`.
+and run `npm run deploy` again.
 
 ## Tested with
 
