@@ -92,9 +92,9 @@ export function buildWorkersAiInput(req: AnthropicMessagesRequest): WorkersAiCha
 }
 
 function clampMaxTokens(requested: number): number {
-  // Workers AI Llama outputs cap around 4096 today; let the platform
-  // surface its own error for over-cap requests but provide a sane
-  // default if the caller didn't ask for anything specific.
+  // Workers AI Llama 4 Scout supports up to 8192 output tokens; let the
+  // platform surface its own error for over-cap requests but provide a
+  // sane default if the caller didn't ask for anything specific.
   if (!Number.isFinite(requested) || requested <= 0) return 1024;
   return requested;
 }

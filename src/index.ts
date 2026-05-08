@@ -32,7 +32,7 @@ export default {
       return new Response(
         JSON.stringify({
           ok: true,
-          model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+          model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct",
           anthropic_fallback: Boolean(env.ANTHROPIC_API_KEY),
         }),
         { headers: { "content-type": "application/json" } },
@@ -122,7 +122,7 @@ export default {
 
     // Workers AI path
     try {
-      const model = env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+      const model = env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct";
       const resp = await callWorkersAi(env.AI, model, parsed);
       const headers = new Headers(resp.headers);
       headers.set("x-fortune-llm-route", "workers-ai");

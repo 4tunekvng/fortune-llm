@@ -56,8 +56,8 @@ export interface AnthropicMessageResponse {
 }
 
 /**
- * Workers AI Llama-3 chat completions input. Matches @cf/meta/llama-3.3-*
- * and friends — see https://developers.cloudflare.com/workers-ai/models/llama-3.3-70b-instruct-fp8-fast/
+ * Workers AI Llama chat completions input. Matches @cf/meta/llama-4-scout-17b-16e-instruct
+ * and friends — see https://developers.cloudflare.com/workers-ai/models/llama-4-scout-17b-16e-instruct/
  */
 export interface WorkersAiChatRequest {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
