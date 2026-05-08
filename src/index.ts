@@ -86,7 +86,7 @@ export default {
           `Endpoint ${url.pathname} is forwarded to Anthropic but ANTHROPIC_API_KEY is not configured.`,
         );
       }
-      return forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+      return withCors(await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY));
     }
 
     let parsed: AnthropicMessagesRequest;
@@ -117,6 +117,7 @@ export default {
       const headers = new Headers(resp.headers);
       headers.set("x-fortune-llm-route", "anthropic");
       headers.set("x-fortune-llm-reason", decision.reason);
+      headers.set("access-control-allow-origin", "*");
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     }
 
@@ -128,6 +129,7 @@ export default {
       headers.set("x-fortune-llm-route", "workers-ai");
       headers.set("x-fortune-llm-model", model);
       headers.set("x-fortune-llm-reason", decision.reason);
+      headers.set("access-control-allow-origin", "*");
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     } catch (err) {
       // If Workers AI itself errored (rate limit, model temporarily down)
@@ -137,6 +139,7 @@ export default {
         const headers = new Headers(fallback.headers);
         headers.set("x-fortune-llm-route", "anthropic");
         headers.set("x-fortune-llm-reason", `workers-ai-failed: ${errorMessage(err)}`);
+        headers.set("access-control-allow-origin", "*");
         return new Response(fallback.body, {
           status: fallback.status,
           statusText: fallback.statusText,
@@ -151,8 +154,18 @@ export default {
 function jsonError(status: number, type: string, message: string): Response {
   return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
   });
+}
+
+// Attach the CORS origin header to any response so browser-side callers can
+// read both successful responses and error bodies. The OPTIONS preflight
+// already returns the full set of CORS headers; actual responses only need
+// Access-Control-Allow-Origin to satisfy the browser's CORS check.
+function withCors(resp: Response): Response {
+  const headers = new Headers(resp.headers);
+  headers.set("access-control-allow-origin", "*");
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
 }
 
 function errorMessage(err: unknown): string {
