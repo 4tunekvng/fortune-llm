@@ -60,13 +60,7 @@ export default {
 
     const auth = authenticate(request, env.GATEWAY_TOKEN);
     if (!auth.ok) {
-      return new Response(
-        JSON.stringify({
-          type: "error",
-          error: { type: "authentication_error", message: auth.message },
-        }),
-        { status: auth.status, headers: { "content-type": "application/json" } },
-      );
+      return jsonError(auth.status, "authentication_error", auth.message);
     }
 
     // Read body once so we can both inspect (route) and forward (Anthropic).
