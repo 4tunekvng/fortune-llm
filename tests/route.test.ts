@@ -45,7 +45,7 @@ describe("decideRoute", () => {
   });
 
   it("routes to anthropic when input is very long", () => {
-    const huge = "x".repeat(80_000); // ~20k tokens
+    const huge = "x".repeat(140_000); // ~35k tokens > 32k threshold
     const d = decideRoute(baseReq({ messages: [{ role: "user", content: huge }] }));
     expect(d.kind).toBe("anthropic");
     expect(d.reason).toMatch(/input tokens/);

@@ -9,8 +9,8 @@
  *                 is improving but inconsistent across providers).
  *   - Vision:     any message includes an image content block.
  *   - Long ctx:   approximate input tokens > LONG_CONTEXT_THRESHOLD.
- *                 Llama 3.3 70B handles 128k natively but quality
- *                 degrades; Anthropic's recall is stronger.
+ *                 Llama 4 Scout (17B MoE) handles 128k context natively;
+ *                 threshold is kept conservative for quality at scale.
  *   - Explicit hint: caller sets `metadata.fortune_route === "anthropic"`.
  *
  * Everything else — plain chat, system prompt + user turn, structured-
@@ -25,7 +25,7 @@ export type RouteDecision =
   | { kind: "workers-ai"; reason: string }
   | { kind: "anthropic"; reason: string };
 
-const LONG_CONTEXT_THRESHOLD = 16_000; // approx tokens; we estimate from char count
+const LONG_CONTEXT_THRESHOLD = 32_000; // approx tokens; Llama 4 Scout handles 128k
 
 export function decideRoute(req: AnthropicMessagesRequest): RouteDecision {
   // 1. Explicit caller override wins.
