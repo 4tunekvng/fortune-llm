@@ -107,7 +107,10 @@ export async function callWorkersAi(
   const input = buildWorkersAiInput(req);
   const raw = await ai.run(model, input);
   if (input.stream) {
-    return streamWorkersAiAsAnthropic(raw as ReadableStream, model);
+    if (!(raw instanceof ReadableStream)) {
+      throw new Error(`Workers AI did not return a stream for model ${model}`);
+    }
+    return streamWorkersAiAsAnthropic(raw, model);
   }
   const result = raw as WorkersAiChatResponse;
   const body = workersAiToAnthropicMessage(result, req.model || model, input);
@@ -235,6 +238,7 @@ export function streamWorkersAiAsAnthropic(
           },
         });
       } finally {
+        reader.releaseLock();
         writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
         writeEvent("message_delta", {
           type: "message_delta",
