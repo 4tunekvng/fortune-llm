@@ -209,7 +209,13 @@ export function streamWorkersAiAsAnthropic(
       try {
         while (true) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done) {
+            // Flush any remaining bytes held by the stateful TextDecoder
+            // (important for multi-byte UTF-8 characters split across chunks).
+            const tail = decoder.decode();
+            if (tail) buffer += tail;
+            break;
+          }
           buffer += decoder.decode(value, { stream: true });
           // Workers AI emits "data: {...}\n\n" frames (SSE-style). Split
           // on the blank-line frame boundary and process each frame.
