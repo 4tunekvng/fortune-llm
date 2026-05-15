@@ -80,7 +80,11 @@ export default {
           `Endpoint ${url.pathname} is forwarded to Anthropic but ANTHROPIC_API_KEY is not configured.`,
         );
       }
-      return withCors(await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY));
+      try {
+        return withCors(await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY));
+      } catch (err) {
+        return jsonError(502, "upstream_error", `Anthropic upstream failed: ${errorMessage(err)}`);
+      }
     }
 
     let parsed: AnthropicMessagesRequest;
@@ -106,7 +110,12 @@ export default {
           `Request needed Anthropic (${decision.reason}) but ANTHROPIC_API_KEY is not configured on the gateway.`,
         );
       }
-      const resp = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+      let resp: Response;
+      try {
+        resp = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+      } catch (err) {
+        return jsonError(502, "upstream_error", `Anthropic upstream failed: ${errorMessage(err)}`);
+      }
       // Tag the response so consumer apps can observe routing in dev.
       const headers = new Headers(resp.headers);
       headers.set("x-fortune-llm-route", "anthropic");
