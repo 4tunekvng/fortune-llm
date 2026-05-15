@@ -214,6 +214,22 @@ export function streamWorkersAiAsAnthropic(
             // (important for multi-byte UTF-8 characters split across chunks).
             const tail = decoder.decode();
             if (tail) buffer += tail;
+            // Process any final SSE frame that arrived without a trailing "\n\n".
+            if (buffer.trim()) {
+              const payload = parseSseFrame(buffer.trim());
+              if (payload && payload !== "[DONE]") {
+                const delta = extractWorkersAiDelta(payload);
+                if (delta) {
+                  outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
+                  writeEvent("content_block_delta", {
+                    type: "content_block_delta",
+                    index: 0,
+                    delta: { type: "text_delta", text: delta },
+                  });
+                }
+              }
+              buffer = "";
+            }
             break;
           }
           buffer += decoder.decode(value, { stream: true });
