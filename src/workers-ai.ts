@@ -204,6 +204,7 @@ export function streamWorkersAiAsAnthropic(
 
       let outputTokenCount = 0;
       let buffer = "";
+      let streamError = false;
       const reader = upstream.getReader();
       try {
         while (true) {
@@ -230,6 +231,7 @@ export function streamWorkersAiAsAnthropic(
           }
         }
       } catch (err) {
+        streamError = true;
         writeEvent("error", {
           type: "error",
           error: {
@@ -239,13 +241,15 @@ export function streamWorkersAiAsAnthropic(
         });
       } finally {
         reader.releaseLock();
-        writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
-        writeEvent("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: { output_tokens: outputTokenCount },
-        });
-        writeEvent("message_stop", { type: "message_stop" });
+        if (!streamError) {
+          writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
+          writeEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: outputTokenCount },
+          });
+          writeEvent("message_stop", { type: "message_stop" });
+        }
         controller.close();
       }
     },
