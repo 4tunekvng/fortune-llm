@@ -138,16 +138,20 @@ export default {
       // If Workers AI itself errored (rate limit, model temporarily down)
       // and Anthropic is configured, transparently retry on Anthropic.
       if (env.ANTHROPIC_API_KEY) {
-        const fallback = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
-        const headers = new Headers(fallback.headers);
-        headers.set("x-fortune-llm-route", "anthropic");
-        headers.set("x-fortune-llm-reason", `workers-ai-failed: ${errorMessage(err)}`);
-        headers.set("access-control-allow-origin", "*");
-        return new Response(fallback.body, {
-          status: fallback.status,
-          statusText: fallback.statusText,
-          headers,
-        });
+        try {
+          const fallback = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+          const headers = new Headers(fallback.headers);
+          headers.set("x-fortune-llm-route", "anthropic");
+          headers.set("x-fortune-llm-reason", "workers-ai-failed");
+          headers.set("access-control-allow-origin", "*");
+          return new Response(fallback.body, {
+            status: fallback.status,
+            statusText: fallback.statusText,
+            headers,
+          });
+        } catch (fallbackErr) {
+          return jsonError(502, "upstream_error", `Workers AI and Anthropic both failed: ${errorMessage(fallbackErr)}`);
+        }
       }
       return jsonError(502, "upstream_error", `Workers AI failed: ${errorMessage(err)}`);
     }
