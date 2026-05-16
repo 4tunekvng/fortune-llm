@@ -272,7 +272,11 @@ export function streamWorkersAiAsAnthropic(
           });
           writeEvent("message_stop", { type: "message_stop" });
         }
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Stream was already closed (e.g. client disconnected).
+        }
       }
     },
   });
