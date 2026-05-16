@@ -33,7 +33,6 @@ export default {
         JSON.stringify({
           ok: true,
           model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct",
-          anthropic_fallback: Boolean(env.ANTHROPIC_API_KEY),
         }),
         { headers: { "content-type": "application/json" } },
       );
