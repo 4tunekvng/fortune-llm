@@ -94,7 +94,7 @@ export function estimateInputTokens(req: AnthropicMessagesRequest): number {
   for (const m of req.messages) {
     if (typeof m.content === "string") {
       chars += m.content.length;
-    } else {
+    } else if (Array.isArray(m.content)) {
       for (const block of m.content) chars += blockCharLength(block);
     }
   }
