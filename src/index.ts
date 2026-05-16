@@ -48,13 +48,7 @@ export default {
     }
 
     if (!url.pathname.startsWith("/v1/")) {
-      return new Response(
-        JSON.stringify({
-          type: "error",
-          error: { type: "not_found", message: `No route for ${request.method} ${url.pathname}` },
-        }),
-        { status: 404, headers: { "content-type": "application/json" } },
-      );
+      return jsonError(404, "not_found", `No route for ${request.method} ${url.pathname}`);
     }
 
     const auth = authenticate(request, env.GATEWAY_TOKEN);
