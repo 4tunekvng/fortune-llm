@@ -4,6 +4,8 @@ import {
   flattenContent,
   workersAiToAnthropicMessage,
   extractWorkersAiDelta,
+  translateTools,
+  translateToolChoice,
 } from "../src/workers-ai.js";
 import type { AnthropicMessagesRequest } from "../src/types.js";
 
@@ -103,6 +105,102 @@ describe("buildWorkersAiInput", () => {
     });
     expect(input.max_tokens).toBe(1024);
   });
+
+  it("translates Anthropic tool_use blocks on an assistant turn to OpenAI tool_calls", () => {
+    const input = buildWorkersAiInput({
+      model: "claude-sonnet-4-6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "search the web for cats" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me search." },
+            { type: "tool_use", id: "toolu_abc", name: "web_search", input: { query: "cats" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_abc", content: "found 1000 results" },
+          ],
+        },
+      ],
+    });
+    const assistantMsg = input.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe("Let me search.");
+    expect(assistantMsg?.tool_calls).toEqual([
+      {
+        id: "toolu_abc",
+        type: "function",
+        function: { name: "web_search", arguments: JSON.stringify({ query: "cats" }) },
+      },
+    ]);
+    const toolMsg = input.messages.find((m) => m.role === "tool");
+    expect(toolMsg).toEqual({
+      role: "tool",
+      tool_call_id: "toolu_abc",
+      content: "found 1000 results",
+    });
+  });
+
+  it("translates request-level tools[] declarations", () => {
+    const input = buildWorkersAiInput({
+      model: "claude-sonnet-4-6",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "get_weather",
+          description: "Get the weather in a city",
+          input_schema: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        },
+      ],
+    });
+    expect(input.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get the weather in a city",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        },
+      },
+    ]);
+  });
+});
+
+describe("translateTools", () => {
+  it("returns undefined for empty / missing input", () => {
+    expect(translateTools(undefined)).toBeUndefined();
+    expect(translateTools([])).toBeUndefined();
+  });
+
+  it("fills a placeholder parameters object when input_schema is missing", () => {
+    const out = translateTools([{ name: "noop", input_schema: undefined as unknown as Record<string, unknown> }]);
+    expect(out?.[0]?.function.parameters).toEqual({ type: "object", properties: {} });
+  });
+});
+
+describe("translateToolChoice", () => {
+  it("maps Anthropic's tool_choice shapes to OpenAI", () => {
+    expect(translateToolChoice({ type: "auto" })).toBe("auto");
+    expect(translateToolChoice({ type: "none" })).toBe("none");
+    expect(translateToolChoice({ type: "any" })).toBe("required");
+    expect(translateToolChoice({ type: "tool", name: "search" })).toEqual({
+      type: "function",
+      function: { name: "search" },
+    });
+  });
 });
 
 describe("workersAiToAnthropicMessage", () => {
@@ -120,6 +218,29 @@ describe("workersAiToAnthropicMessage", () => {
     expect(msg.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
   });
 
+  it("converts Workers AI tool_calls to Anthropic tool_use content blocks with stop_reason=tool_use", () => {
+    const msg = workersAiToAnthropicMessage(
+      {
+        response: "Calling tool.",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: JSON.stringify({ city: "Tokyo" }) },
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      },
+      "claude-sonnet-4-6",
+      { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
+    );
+    expect(msg.stop_reason).toBe("tool_use");
+    expect(msg.content).toEqual([
+      { type: "text", text: "Calling tool." },
+      { type: "tool_use", id: "call_1", name: "get_weather", input: { city: "Tokyo" } },
+    ]);
+  });
+
   it("estimates tokens when Workers AI omits usage", () => {
     const msg = workersAiToAnthropicMessage(
       { response: "abcd".repeat(10) },
@@ -128,6 +249,16 @@ describe("workersAiToAnthropicMessage", () => {
     );
     expect(msg.usage.input_tokens).toBeGreaterThan(0);
     expect(msg.usage.output_tokens).toBe(10);
+  });
+
+  it("ensures at least one content block even for empty Workers AI responses", () => {
+    const msg = workersAiToAnthropicMessage(
+      {},
+      "claude-sonnet-4-6",
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+    );
+    expect(msg.content).toHaveLength(1);
+    expect(msg.content[0]).toEqual({ type: "text", text: "" });
   });
 });
 

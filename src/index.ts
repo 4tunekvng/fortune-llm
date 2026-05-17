@@ -1,27 +1,31 @@
 /**
  * fortune-llm — Anthropic-Messages-API-compatible gateway for Cloudflare
- * Workers. See README.md for the full architecture.
+ * Workers. Routes to free backends by default (Workers AI, then Gemini)
+ * and fails loudly when the free chain is exhausted. Paid Anthropic is
+ * available only via explicit `metadata.fortune_route="anthropic"`.
  *
  * Routes:
  *   GET  /healthz         — liveness probe (no auth)
- *   POST /v1/messages     — Anthropic Messages API; routes to Workers AI
- *                           by default, escalates to Anthropic when the
- *                           request needs capabilities OSS can't deliver.
- *   *    /v1/*            — every other Anthropic endpoint is forwarded
- *                           as-is (count_tokens, batches, etc.).
+ *   POST /v1/messages     — runs the routed fallback chain
+ *   *    /v1/*            — every other Anthropic endpoint forwarded only
+ *                           when explicitly opted into Anthropic (legacy
+ *                           endpoints like count_tokens / batches).
  */
 
 import type { AnthropicMessagesRequest } from "./types.js";
 import { authenticate } from "./auth.js";
-import { decideRoute, type RouteDecision } from "./route.js";
+import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
+import { callGemini, DEFAULT_GEMINI_MODEL } from "./gemini.js";
 
 interface Env {
   AI: { run(model: string, input: unknown): Promise<unknown> };
   ANTHROPIC_API_KEY?: string;
+  GEMINI_API_KEY?: string;
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
+  DEFAULT_GEMINI_MODEL?: string;
 }
 
 export default {
@@ -32,19 +36,17 @@ export default {
       return new Response(
         JSON.stringify({
           ok: true,
-          model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct",
+          oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct",
+          gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
+          gemini_configured: Boolean(env.GEMINI_API_KEY),
+          anthropic_configured: Boolean(env.ANTHROPIC_API_KEY),
         }),
         { headers: { "content-type": "application/json" } },
       );
     }
 
-    // CORS preflight — Anthropic SDK doesn't actually trigger one, but
-    // browser-side direct callers might.
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(),
-      });
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
     if (!url.pathname.startsWith("/v1/")) {
@@ -56,21 +58,20 @@ export default {
       return jsonError(auth.status, "authentication_error", auth.message);
     }
 
-    // Read body once so we can both inspect (route) and forward (Anthropic).
     let rawBody = "";
     if (request.method !== "GET" && request.method !== "HEAD") {
       rawBody = await request.text();
     }
 
-    // Anything other than POST /v1/messages — just forward to Anthropic.
-    // Those endpoints (count_tokens, batches, etc.) aren't worth
-    // re-implementing on Workers AI.
+    // Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
+    // specific and don't translate cleanly. Only forward when Anthropic
+    // is configured; otherwise reject so callers see the policy clearly.
     if (!(request.method === "POST" && url.pathname === "/v1/messages")) {
       if (!env.ANTHROPIC_API_KEY) {
         return jsonError(
           501,
-          "anthropic_unavailable",
-          `Endpoint ${url.pathname} is forwarded to Anthropic but ANTHROPIC_API_KEY is not configured.`,
+          "not_implemented",
+          `Endpoint ${url.pathname} is Anthropic-only and ANTHROPIC_API_KEY is not configured. Free backends only support /v1/messages.`,
         );
       }
       try {
@@ -98,63 +99,73 @@ export default {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must be a positive integer.");
     }
 
-    const decision: RouteDecision = decideRoute(parsed);
+    const chain: RouteChain = decideRoute(parsed);
+    const errors: Array<{ tier: BackendKind; error: string }> = [];
 
-    if (decision.kind === "anthropic") {
-      if (!env.ANTHROPIC_API_KEY) {
-        return jsonError(
-          503,
-          "anthropic_unavailable",
-          `Request needed Anthropic (${decision.reason}) but ANTHROPIC_API_KEY is not configured on the gateway.`,
-        );
-      }
-      let resp: Response;
+    for (let i = 0; i < chain.tiers.length; i++) {
+      const tier = chain.tiers[i];
+      if (!tier) continue;
       try {
-        resp = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+        const resp = await invokeTier(tier, env, parsed, request, rawBody);
+        const headers = new Headers(resp.headers);
+        headers.set("x-fortune-llm-route", tier);
+        headers.set("x-fortune-llm-chain", chain.tiers.join(","));
+        headers.set("x-fortune-llm-reason", chain.reason);
+        if (errors.length > 0) {
+          headers.set(
+            "x-fortune-llm-prior-errors",
+            errors.map((e) => `${e.tier}:${e.error.slice(0, 80)}`).join(" | "),
+          );
+        }
+        headers.set("access-control-allow-origin", "*");
+        return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
       } catch (err) {
-        return jsonError(502, "upstream_error", `Anthropic upstream failed: ${errorMessage(err)}`);
+        errors.push({ tier, error: errorMessage(err) });
+        // continue to next tier
       }
-      // Tag the response so consumer apps can observe routing in dev.
-      const headers = new Headers(resp.headers);
-      headers.set("x-fortune-llm-route", "anthropic");
-      headers.set("x-fortune-llm-reason", decision.reason);
-      headers.set("access-control-allow-origin", "*");
-      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     }
 
-    // Workers AI path
-    try {
-      const model = env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct";
-      const resp = await callWorkersAi(env.AI, model, parsed);
-      const headers = new Headers(resp.headers);
-      headers.set("x-fortune-llm-route", "workers-ai");
-      headers.set("x-fortune-llm-model", model);
-      headers.set("x-fortune-llm-reason", decision.reason);
-      headers.set("access-control-allow-origin", "*");
-      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
-    } catch (err) {
-      // If Workers AI itself errored (rate limit, model temporarily down)
-      // and Anthropic is configured, transparently retry on Anthropic.
-      if (env.ANTHROPIC_API_KEY) {
-        try {
-          const fallback = await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
-          const headers = new Headers(fallback.headers);
-          headers.set("x-fortune-llm-route", "anthropic");
-          headers.set("x-fortune-llm-reason", "workers-ai-failed");
-          headers.set("access-control-allow-origin", "*");
-          return new Response(fallback.body, {
-            status: fallback.status,
-            statusText: fallback.statusText,
-            headers,
-          });
-        } catch (fallbackErr) {
-          return jsonError(502, "upstream_error", `Workers AI and Anthropic both failed: ${errorMessage(fallbackErr)}`);
-        }
-      }
-      return jsonError(502, "upstream_error", `Workers AI failed: ${errorMessage(err)}`);
-    }
+    // Chain exhausted — fail loudly. No silent escalation to paid.
+    return jsonError(
+      503,
+      "all_backends_failed",
+      `All free backends in chain [${chain.tiers.join(",")}] failed. ${errors
+        .map((e) => `${e.tier}: ${e.error}`)
+        .join(" | ")}`,
+    );
   },
 };
+
+async function invokeTier(
+  tier: BackendKind,
+  env: Env,
+  parsed: AnthropicMessagesRequest,
+  request: Request,
+  rawBody: string,
+): Promise<Response> {
+  if (tier === "workers-ai") {
+    const model = env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct";
+    const resp = await callWorkersAi(env.AI, model, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  if (tier === "gemini") {
+    if (!env.GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY not configured");
+    }
+    const model = env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+    const resp = await callGemini({ apiKey: env.GEMINI_API_KEY, model }, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  // tier === "anthropic" — paid escape valve. Only reached via explicit metadata override.
+  if (!env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY not configured");
+  }
+  return forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+}
 
 function jsonError(status: number, type: string, message: string): Response {
   return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
@@ -163,10 +174,6 @@ function jsonError(status: number, type: string, message: string): Response {
   });
 }
 
-// Attach the CORS origin header to any response so browser-side callers can
-// read both successful responses and error bodies. The OPTIONS preflight
-// already returns the full set of CORS headers; actual responses only need
-// Access-Control-Allow-Origin to satisfy the browser's CORS check.
 function withCors(resp: Response): Response {
   const headers = new Headers(resp.headers);
   headers.set("access-control-allow-origin", "*");

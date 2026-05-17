@@ -1,14 +1,15 @@
 {
   "name": "fortune-llm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Anthropic-Messages-API-compatible gateway. Routes to Cloudflare Workers AI by default; falls back to real Anthropic when a request needs capabilities OSS models can't deliver (tool use, vision, very long context).",
+  "description": "Anthropic-Messages-API-compatible gateway. Routes to free backends (Cloudflare Workers AI, Gemini) by default; fails loudly when the free chain is exhausted. Paid Anthropic is opt-in only.",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "login": "wrangler login",
     "secret:set:token": "wrangler secret put GATEWAY_TOKEN",
+    "secret:set:gemini": "wrangler secret put GEMINI_API_KEY",
     "secret:set:anthropic": "wrangler secret put ANTHROPIC_API_KEY",
     "tail": "wrangler tail",
     "typecheck": "tsc --noEmit",

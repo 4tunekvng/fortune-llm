@@ -1,62 +1,59 @@
 /**
- * Per-request routing decision: "OSS via Workers AI" vs "real Anthropic".
+ * Per-request routing decision: an ordered fallback chain of free
+ * backends. The dispatcher tries them in order until one succeeds.
  *
- * We default to OSS — it's free for the user. We only escalate when the
- * request meaningfully needs a capability OSS Llama can't reliably
- * deliver:
+ * Default policy (zero-paid):
+ *   - plain chat / tool use  →  [workers-ai, gemini]
+ *   - image content present  →  [gemini]              (workers-ai has no vision)
+ *   - very long context      →  [gemini, workers-ai]  (gemini first; bigger native window)
  *
- *   - Tool use:   `tools` array present (Llama's native tool-call accuracy
- *                 is improving but inconsistent across providers).
- *   - Vision:     any message includes an image content block.
- *   - Long ctx:   approximate input tokens > LONG_CONTEXT_THRESHOLD.
- *                 Llama 4 Scout (17B MoE) handles 128k context natively;
- *                 threshold is kept conservative for quality at scale.
- *   - Explicit hint: caller sets `metadata.fortune_route === "anthropic"`.
+ * Explicit per-request overrides via `metadata.fortune_route`:
+ *   - "anthropic"   →  [anthropic]   (escape valve — paid)
+ *   - "workers-ai"  →  [workers-ai]
+ *   - "gemini"      →  [gemini]
  *
- * Everything else — plain chat, system prompt + user turn, structured-
- * looking JSON output asks — goes to Workers AI.
- *
- * The function is pure and tested in tests/route.test.ts.
+ * When the chain is exhausted (every tier failed or rate-limited) the
+ * gateway fails loudly. There is intentionally no silent escalation to
+ * paid Anthropic.
  */
 
 import type { AnthropicMessagesRequest, AnthropicContentBlock } from "./types.js";
 
-export type RouteDecision =
-  | { kind: "workers-ai"; reason: string }
-  | { kind: "anthropic"; reason: string };
+export type BackendKind = "workers-ai" | "gemini" | "anthropic";
 
-const LONG_CONTEXT_THRESHOLD = 32_000; // approx tokens; Llama 4 Scout handles 128k
+export interface RouteChain {
+  tiers: BackendKind[];
+  reason: string;
+}
 
-export function decideRoute(req: AnthropicMessagesRequest): RouteDecision {
-  // 1. Explicit caller override wins.
+const LONG_CONTEXT_THRESHOLD = 100_000;
+
+export function decideRoute(req: AnthropicMessagesRequest): RouteChain {
   const meta = req.metadata as { fortune_route?: string } | undefined;
+
   if (meta?.fortune_route === "anthropic") {
-    return { kind: "anthropic", reason: "explicit metadata.fortune_route override" };
+    return { tiers: ["anthropic"], reason: "explicit metadata.fortune_route=anthropic" };
   }
   if (meta?.fortune_route === "workers-ai") {
-    return { kind: "workers-ai", reason: "explicit metadata.fortune_route override" };
+    return { tiers: ["workers-ai"], reason: "explicit metadata.fortune_route=workers-ai" };
+  }
+  if (meta?.fortune_route === "gemini") {
+    return { tiers: ["gemini"], reason: "explicit metadata.fortune_route=gemini" };
   }
 
-  // 2. Tool use → Anthropic.
-  if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return { kind: "anthropic", reason: `tools=${req.tools.length}` };
-  }
-
-  // 3. Vision → Anthropic.
   if (containsImage(req)) {
-    return { kind: "anthropic", reason: "image content block present" };
+    return { tiers: ["gemini"], reason: "image content block present" };
   }
 
-  // 4. Long context → Anthropic.
   const approxTokens = estimateInputTokens(req);
   if (approxTokens > LONG_CONTEXT_THRESHOLD) {
     return {
-      kind: "anthropic",
+      tiers: ["gemini", "workers-ai"],
       reason: `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}`,
     };
   }
 
-  return { kind: "workers-ai", reason: "default route (no escalation triggers)" };
+  return { tiers: ["workers-ai", "gemini"], reason: "default free chain" };
 }
 
 function containsImage(req: AnthropicMessagesRequest): boolean {
@@ -81,9 +78,7 @@ function isImageBlock(block: AnthropicContentBlock): boolean {
 
 /**
  * Crude character-count → token approximation. Anthropic's tokenizer
- * averages ~3.7 chars/token in English; we use 4 as a generous upper
- * bound for routing purposes. Off by ~10–15% but the threshold has
- * margin built in.
+ * averages ~3.7 chars/token in English; we use 4 for routing purposes.
  */
 export function estimateInputTokens(req: AnthropicMessagesRequest): number {
   let chars = 0;
@@ -105,6 +100,5 @@ function blockCharLength(block: AnthropicContentBlock): number {
   if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
     return ((block as { text: string }).text).length;
   }
-  // Conservative fallback for opaque blocks.
   return 200;
 }

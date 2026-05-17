@@ -10,23 +10,19 @@ const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMe
 });
 
 describe("decideRoute", () => {
-  it("defaults to workers-ai for plain text chat", () => {
+  it("defaults to the free chain [workers-ai, gemini] for plain text chat", () => {
     const d = decideRoute(baseReq());
-    expect(d.kind).toBe("workers-ai");
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes to anthropic when tools is non-empty", () => {
-    const d = decideRoute(baseReq({ tools: [{ name: "search" }] }));
-    expect(d.kind).toBe("anthropic");
-    expect(d.reason).toContain("tools=1");
+  it("does NOT escalate to anthropic when tools are present (workers-ai handles them now)", () => {
+    const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("does NOT route to anthropic when tools is an empty array", () => {
-    const d = decideRoute(baseReq({ tools: [] }));
-    expect(d.kind).toBe("workers-ai");
-  });
-
-  it("routes to anthropic on any image content block", () => {
+  it("routes vision-bearing requests to gemini only (workers-ai has no vision)", () => {
     const d = decideRoute(
       baseReq({
         messages: [
@@ -34,37 +30,48 @@ describe("decideRoute", () => {
             role: "user",
             content: [
               { type: "text", text: "what's in this?" },
-              { type: "image", source: { type: "base64", data: "..." } },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "..." } },
             ],
           },
         ],
       }),
     );
-    expect(d.kind).toBe("anthropic");
-    expect(d.reason).toContain("image");
+    expect(d.tiers).toEqual(["gemini"]);
+    expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes to anthropic when input is very long", () => {
-    const huge = "x".repeat(140_000); // ~35k tokens > 32k threshold
+  it("prefers gemini for very long context but keeps workers-ai as fallback", () => {
+    const huge = "x".repeat(420_000); // ~105k tokens > 100k threshold
     const d = decideRoute(baseReq({ messages: [{ role: "user", content: huge }] }));
-    expect(d.kind).toBe("anthropic");
-    expect(d.reason).toMatch(/input tokens/);
+    expect(d.tiers[0]).toBe("gemini");
+    expect(d.tiers).toContain("workers-ai");
+    expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("honors metadata.fortune_route override forcing anthropic", () => {
+  it("honors metadata.fortune_route=anthropic as the explicit escape valve", () => {
     const d = decideRoute(baseReq({ metadata: { fortune_route: "anthropic" } }));
-    expect(d.kind).toBe("anthropic");
+    expect(d.tiers).toEqual(["anthropic"]);
     expect(d.reason).toContain("explicit");
   });
 
-  it("honors metadata.fortune_route override forcing workers-ai (even with tools)", () => {
+  it("honors metadata.fortune_route=workers-ai (even with tools)", () => {
     const d = decideRoute(
       baseReq({
-        tools: [{ name: "x" }],
+        tools: [{ name: "x", input_schema: { type: "object" } }],
         metadata: { fortune_route: "workers-ai" },
       }),
     );
-    expect(d.kind).toBe("workers-ai");
+    expect(d.tiers).toEqual(["workers-ai"]);
+  });
+
+  it("honors metadata.fortune_route=gemini", () => {
+    const d = decideRoute(baseReq({ metadata: { fortune_route: "gemini" } }));
+    expect(d.tiers).toEqual(["gemini"]);
+  });
+
+  it("empty tools array does not change routing", () => {
+    const d = decideRoute(baseReq({ tools: [] }));
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
   });
 });
 
