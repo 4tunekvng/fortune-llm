@@ -89,7 +89,12 @@ export default {
     if (!parsed || !Array.isArray(parsed.messages)) {
       return jsonError(400, "invalid_request_error", "Field 'messages' must be an array.");
     }
-    if (typeof parsed.max_tokens !== "number" || !Number.isFinite(parsed.max_tokens) || parsed.max_tokens <= 0) {
+    if (
+      typeof parsed.max_tokens !== "number" ||
+      !Number.isFinite(parsed.max_tokens) ||
+      !Number.isInteger(parsed.max_tokens) ||
+      parsed.max_tokens <= 0
+    ) {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must be a positive integer.");
     }
 
