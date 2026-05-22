@@ -16,10 +16,10 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250101.0",
+    "@cloudflare/workers-types": "^4.20260522.1",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
-    "wrangler": "^4.92.0"
+    "wrangler": "^4.94.0"
   },
   "engines": {
     "node": ">=20"
