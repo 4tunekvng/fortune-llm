@@ -402,6 +402,13 @@ export function streamGeminiAsAnthropic(
 
       let blockIndex = -1;
       let currentBlockKind: "text" | "tool_use" | null = null;
+      // Anthropic's protocol expects stop_reason="tool_use" when the
+      // assistant turn contains any tool_use block. The runner on the
+      // consumer side branches on this exact value to decide whether to
+      // execute the tool — without it, the chat appears to stall after
+      // the model decides to call something. Track whether we ever
+      // emitted a tool_use so the finalizer can shape the right reason.
+      let emittedToolUse = false;
       let outputTokens = 0;
       let inputTokens = 0;
       let finishReason: string | undefined;
@@ -462,9 +469,12 @@ export function streamGeminiAsAnthropic(
           closeCurrentBlock();
           let stopReason: AnthropicStopReason = "end_turn";
           if (finishReason === "MAX_TOKENS") stopReason = "max_tokens";
-          if (currentBlockKind === null && blockIndex >= 0) {
-            // already closed; check last kind by checking if any tool_use blocks were emitted
-          }
+          // tool_use takes precedence over end_turn. Consumer runners
+          // (e.g. Anthropic SDK's `messages.stream()`) branch on the
+          // accumulated stop_reason to decide whether to execute the
+          // tool and re-loop; mis-reporting end_turn here causes the
+          // chat to silently stall after a tool call.
+          if (emittedToolUse) stopReason = "tool_use";
           writeEvent("message_delta", {
             type: "message_delta",
             delta: { stop_reason: stopReason, stop_sequence: null },
@@ -503,6 +513,7 @@ export function streamGeminiAsAnthropic(
             closeCurrentBlock();
             blockIndex += 1;
             currentBlockKind = "tool_use";
+            emittedToolUse = true;
             const fc = part.functionCall;
             writeEvent("content_block_start", {
               type: "content_block_start",

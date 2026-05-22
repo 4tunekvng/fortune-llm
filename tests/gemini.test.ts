@@ -5,6 +5,7 @@ import {
   sanitizeJsonSchemaForGemini,
   geminiToAnthropicMessage,
   requestHasImage,
+  streamGeminiAsAnthropic,
 } from "../src/gemini.js";
 import type { AnthropicMessagesRequest, GeminiResponse } from "../src/types.js";
 
@@ -301,5 +302,117 @@ describe("requestHasImage", () => {
 
   it("returns false for text-only requests", () => {
     expect(requestHasImage(baseReq())).toBe(false);
+  });
+});
+
+describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", () => {
+  /**
+   * Build a Gemini SSE upstream that emits a single chunk shaped like
+   * what generativelanguage.googleapis.com sends in streamGenerateContent.
+   * `parts` controls whether the candidate carries a text part, a
+   * functionCall part, or both.
+   */
+  function makeUpstream(parts: unknown[], finishReason = "STOP"): ReadableStream<Uint8Array> {
+    const payload = {
+      candidates: [{ content: { parts }, finishReason }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+    };
+    const sse = `data: ${JSON.stringify(payload)}\n\n`;
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse));
+        controller.close();
+      },
+    });
+  }
+
+  async function consumeDownstream(resp: Response): Promise<Record<string, unknown>[]> {
+    const reader = resp.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const events: Record<string, unknown>[] = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 2);
+        let data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("data:")) {
+            data = line.slice(5).trim();
+            break;
+          }
+        }
+        if (data) {
+          try {
+            events.push(JSON.parse(data));
+          } catch {
+            /* ignore malformed */
+          }
+        }
+      }
+    }
+    return events;
+  }
+
+  it("emits stop_reason=tool_use when the stream contained a functionCall part", async () => {
+    const upstream = makeUpstream([
+      { functionCall: { name: "who_am_i", args: {} } },
+    ]);
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("tool_use");
+  });
+
+  it("emits stop_reason=end_turn for a pure-text response", async () => {
+    const upstream = makeUpstream([{ text: "hi there" }]);
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("end_turn");
+  });
+
+  it("emits stop_reason=tool_use when text+functionCall coexist in one candidate", async () => {
+    const upstream = makeUpstream([
+      { text: "let me check" },
+      { functionCall: { name: "who_am_i", args: {} } },
+    ]);
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("tool_use");
+  });
+
+  it("emits stop_reason=max_tokens when finishReason is MAX_TOKENS and no tool was called", async () => {
+    const upstream = makeUpstream([{ text: "lorem ipsum" }], "MAX_TOKENS");
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("max_tokens");
+  });
+
+  it("tool_use takes precedence over MAX_TOKENS when both signals are present", async () => {
+    const upstream = makeUpstream(
+      [{ functionCall: { name: "who_am_i", args: {} } }],
+      "MAX_TOKENS",
+    );
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("tool_use");
   });
 });
