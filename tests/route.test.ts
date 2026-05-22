@@ -16,10 +16,11 @@ describe("decideRoute", () => {
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("does NOT escalate to anthropic when tools are present (workers-ai handles them now)", () => {
+  it("routes tools[]-bearing requests gemini-first (Llama 4 Scout bounces Claude-Code-style agent prompts)", () => {
     const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual(["gemini", "workers-ai"]);
     expect(d.tiers).not.toContain("anthropic");
+    expect(d.reason).toMatch(/tools=1/);
   });
 
   it("routes vision-bearing requests to gemini only (workers-ai has no vision)", () => {

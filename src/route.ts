@@ -3,9 +3,15 @@
  * backends. The dispatcher tries them in order until one succeeds.
  *
  * Default policy (zero-paid):
- *   - plain chat / tool use  →  [workers-ai, gemini]
- *   - image content present  →  [gemini]              (workers-ai has no vision)
- *   - very long context      →  [gemini, workers-ai]  (gemini first; bigger native window)
+ *   - plain text chat        →  [workers-ai, gemini]  (small model fine; save Gemini quota)
+ *   - has tools[]            →  [gemini, workers-ai]  (Llama 4 Scout reliably bounces
+ *                                                      Claude-Code-style agent prompts —
+ *                                                      "Your input is incomplete" — so
+ *                                                      complex agentic traffic prefers
+ *                                                      Gemini, with Workers AI as backup
+ *                                                      via the circuit-breaker fallback)
+ *   - image content present  →  [gemini]              (Workers AI has no vision)
+ *   - very long context      →  [gemini, workers-ai]  (Gemini's window is bigger)
  *
  * Explicit per-request overrides via `metadata.fortune_route`:
  *   - "anthropic"   →  [anthropic]   (escape valve — paid)
@@ -53,7 +59,18 @@ export function decideRoute(req: AnthropicMessagesRequest): RouteChain {
     };
   }
 
-  return { tiers: ["workers-ai", "gemini"], reason: "default free chain" };
+  // Tools[] present → Claude-Code-style agent traffic. Llama 4 Scout
+  // reliably bounces these with "Your input is incomplete" (empirically
+  // verified 2026-05-22). Route to Gemini first; Workers AI is the
+  // fallback when Gemini's quota trips (the circuit breaker handles it).
+  if (Array.isArray(req.tools) && req.tools.length > 0) {
+    return {
+      tiers: ["gemini", "workers-ai"],
+      reason: `tools=${req.tools.length}; gemini handles agent prompts more reliably than workers-ai`,
+    };
+  }
+
+  return { tiers: ["workers-ai", "gemini"], reason: "plain text chat; workers-ai default" };
 }
 
 function containsImage(req: AnthropicMessagesRequest): boolean {

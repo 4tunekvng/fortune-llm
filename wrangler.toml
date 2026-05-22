@@ -39,8 +39,8 @@ binding = "AI"
 #   CIRCUIT_TRIP_DURATION_MS = "1800000"   # 30 min
 [[kv_namespaces]]
 binding = "CIRCUIT"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_NAMESPACE_ID"
+id = "2ff745a8a79e47fd8a3728da8f81ce6d"
+preview_id = "cf3be286c95c445a88e4bd54a27f5627"
 
 [observability]
 enabled = true

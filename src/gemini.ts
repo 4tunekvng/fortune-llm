@@ -97,26 +97,83 @@ export function translateToolsToGemini(tools: AnthropicTool[]) {
 }
 
 /**
- * Gemini's function-calling parameter schema is a subset of JSON Schema.
- * It rejects some keywords (e.g. `$schema`, `additionalProperties`,
- * `default` on non-string types). We strip the known offenders so
- * Anthropic-format schemas round-trip cleanly.
+ * Gemini's function-calling parameter schema is a strict subset of JSON
+ * Schema (modeled after OpenAPI 3.0's Schema object). Anthropic-format
+ * tool schemas frequently include keywords Gemini rejects with HTTP 400:
+ * `$schema`, `additionalProperties`, `exclusiveMinimum`,
+ * `exclusiveMaximum`, `propertyNames`, `patternProperties`, `$defs`, etc.
+ *
+ * We use an *allowlist* of fields Gemini documents support for — anything
+ * not on the list is dropped on the way through. This is more durable
+ * than blocklisting because new Anthropic / JSON-Schema keywords don't
+ * silently break us in the future.
+ *
+ * Reference: https://ai.google.dev/api/caching#Schema
+ */
+const GEMINI_SCHEMA_ALLOWED_FIELDS = new Set([
+  "type",
+  "format",
+  "description",
+  "nullable",
+  "enum",
+  "items",
+  "properties",
+  "required",
+  "minItems",
+  "maxItems",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "minimum",
+  "maximum",
+  "multipleOf",
+  "title",
+  "default",
+  "example",
+  "anyOf",
+]);
+
+/**
+ * Walk a JSON Schema node, keep only Gemini-allowed schema keywords, and
+ * recursively sanitize the schemas embedded as values:
+ *   - `properties`: arbitrary property-name keys; values are sub-schemas
+ *   - `items`: single sub-schema
+ *   - `anyOf` / `allOf` / `oneOf`: array of sub-schemas
+ *
+ * The allowlist applies to *schema-keyword* keys, not to arbitrary
+ * property names — otherwise we'd erase the user's property names too.
  */
 export function sanitizeJsonSchemaForGemini(schema: Record<string, unknown>): Record<string, unknown> {
-  const banned = new Set(["$schema", "additionalProperties", "definitions", "$defs", "$id", "$ref"]);
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === "object") {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-        if (banned.has(k)) continue;
-        out[k] = walk(v);
-      }
-      return out;
+  return sanitizeSchemaNode(schema) as Record<string, unknown>;
+}
+
+function sanitizeSchemaNode(node: unknown): unknown {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return node;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    if (!GEMINI_SCHEMA_ALLOWED_FIELDS.has(k)) continue;
+    if (k === "properties") {
+      out[k] = sanitizePropertiesMap(v);
+    } else if (k === "items") {
+      out[k] = sanitizeSchemaNode(v);
+    } else if (k === "anyOf") {
+      out[k] = Array.isArray(v) ? v.map(sanitizeSchemaNode) : v;
+    } else {
+      // type, description, enum (array of primitives), required (array of
+      // strings), pattern, minimum/maximum/etc. — pass through unchanged.
+      out[k] = v;
     }
-    return node;
-  };
-  return walk(schema) as Record<string, unknown>;
+  }
+  return out;
+}
+
+function sanitizePropertiesMap(node: unknown): Record<string, unknown> {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [propName, propSchema] of Object.entries(node as Record<string, unknown>)) {
+    out[propName] = sanitizeSchemaNode(propSchema);
+  }
+  return out;
 }
 
 function buildToolUseIdMap(messages: AnthropicMessage[]): Map<string, string> {

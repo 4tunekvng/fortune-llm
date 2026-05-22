@@ -135,7 +135,7 @@ describe("buildGeminiInput", () => {
 });
 
 describe("sanitizeJsonSchemaForGemini", () => {
-  it("strips $schema, additionalProperties, $defs etc.", () => {
+  it("strips $schema, additionalProperties, $defs etc. (legacy blocklist cases)", () => {
     const out = sanitizeJsonSchemaForGemini({
       $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
@@ -149,6 +149,57 @@ describe("sanitizeJsonSchemaForGemini", () => {
     expect(out).not.toHaveProperty("additionalProperties");
     expect(out).not.toHaveProperty("$defs");
     expect((out.properties as Record<string, Record<string, unknown>>).city).not.toHaveProperty("$ref");
+  });
+
+  it("strips exclusiveMinimum / exclusiveMaximum / propertyNames / patternProperties (Claude-Code tool schemas)", () => {
+    const out = sanitizeJsonSchemaForGemini({
+      type: "object",
+      properties: {
+        line: {
+          type: "integer",
+          exclusiveMinimum: 0,
+          exclusiveMaximum: 10000,
+          description: "Line number, 1-indexed.",
+        },
+        glob: {
+          type: "object",
+          propertyNames: { pattern: "^[A-Z_]+$" },
+          patternProperties: { "^.*$": { type: "string" } },
+        },
+      },
+      required: ["line"],
+    });
+    const lineSchema = (out.properties as Record<string, Record<string, unknown>>).line!;
+    expect(lineSchema).not.toHaveProperty("exclusiveMinimum");
+    expect(lineSchema).not.toHaveProperty("exclusiveMaximum");
+    // Allowed fields preserved.
+    expect(lineSchema.type).toBe("integer");
+    expect(lineSchema.description).toBe("Line number, 1-indexed.");
+    const globSchema = (out.properties as Record<string, Record<string, unknown>>).glob!;
+    expect(globSchema).not.toHaveProperty("propertyNames");
+    expect(globSchema).not.toHaveProperty("patternProperties");
+    // required preserved at the top level
+    expect(out.required).toEqual(["line"]);
+  });
+
+  it("preserves the Gemini-allowed schema fields (type, items, enum, etc.)", () => {
+    const out = sanitizeJsonSchemaForGemini({
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["read", "write"] },
+        path: { type: "string", pattern: "^/.*", minLength: 1 },
+        bytes: { type: "integer", minimum: 0, maximum: 1_000_000 },
+        files: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 },
+      },
+      required: ["mode", "path"],
+    });
+    expect(out.type).toBe("object");
+    expect(out.required).toEqual(["mode", "path"]);
+    const props = out.properties as Record<string, Record<string, unknown>>;
+    expect(props.mode).toEqual({ type: "string", enum: ["read", "write"] });
+    expect(props.path).toEqual({ type: "string", pattern: "^/.*", minLength: 1 });
+    expect(props.bytes).toEqual({ type: "integer", minimum: 0, maximum: 1_000_000 });
+    expect(props.files).toEqual({ type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 });
   });
 });
 
