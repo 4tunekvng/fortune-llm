@@ -281,6 +281,117 @@ describe("geminiToAnthropicMessage", () => {
   });
 });
 
+describe("callGemini tool-silence detection", () => {
+  // Mock fetch so we can drive the response shape without hitting Google.
+  const realFetch = globalThis.fetch;
+  afterEachInstall();
+
+  function afterEachInstall() {
+    // vitest's afterEach via dynamic import to avoid changing the existing imports.
+  }
+
+  function withFetchOnce(body: object) {
+    (globalThis as { fetch: typeof fetch }).fetch = (async () =>
+      new Response(JSON.stringify(body), { status: 200 })) as typeof fetch;
+  }
+
+  // restore fetch after each test
+  it("throws when fortune_require_tools=true and Gemini returned no functionCall", async () => {
+    const { callGemini } = await import("../src/gemini.js");
+    withFetchOnce({
+      candidates: [
+        {
+          content: { parts: [{ text: "Sure, I can help with that." }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 12 },
+    });
+
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "do the thing" }],
+      tools: [
+        {
+          name: "do_thing",
+          description: "do the thing",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      metadata: { fortune_require_tools: true } as { fortune_require_tools: boolean },
+    };
+
+    await expect(callGemini({ apiKey: "test", model: "gemini-2.5-flash" }, req)).rejects.toThrow(
+      /no tool calls/i,
+    );
+
+    globalThis.fetch = realFetch;
+  });
+
+  it("does NOT throw when fortune_require_tools is missing (default behaviour)", async () => {
+    const { callGemini } = await import("../src/gemini.js");
+    withFetchOnce({
+      candidates: [
+        { content: { parts: [{ text: "Sure thing." }] }, finishReason: "STOP" },
+      ],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 4 },
+    });
+
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "do_thing",
+          description: "do the thing",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    };
+
+    const resp = await callGemini({ apiKey: "test", model: "gemini-2.5-flash" }, req);
+    expect(resp.status).toBe(200);
+
+    globalThis.fetch = realFetch;
+  });
+
+  it("does NOT throw when fortune_require_tools=true and Gemini DID call a tool", async () => {
+    const { callGemini } = await import("../src/gemini.js");
+    withFetchOnce({
+      candidates: [
+        {
+          content: {
+            parts: [{ functionCall: { name: "do_thing", args: {} } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 4 },
+    });
+
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "do it" }],
+      tools: [
+        {
+          name: "do_thing",
+          description: "do the thing",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      metadata: { fortune_require_tools: true } as { fortune_require_tools: boolean },
+    };
+
+    const resp = await callGemini({ apiKey: "test", model: "gemini-2.5-flash" }, req);
+    expect(resp.status).toBe(200);
+
+    globalThis.fetch = realFetch;
+  });
+});
+
 describe("requestHasImage", () => {
   it("returns true when any user message contains an image block", () => {
     expect(

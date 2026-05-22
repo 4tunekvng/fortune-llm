@@ -235,6 +235,24 @@ export async function callWorkersAi(
   if (hasTools) {
     const nonStreamInput = { ...input, stream: false };
     const raw = (await ai.run(model, nonStreamInput)) as WorkersAiChatResponse;
+
+    // Tool-silence detection. Opt-in via metadata.fortune_require_tools=true.
+    // Llama-on-Workers-AI is known to ignore tools and answer in plain text
+    // when the prompt is Anthropic-shaped; consumers that need a tool call
+    // (e.g. multi-turn agent loops) get a recoverable error so the
+    // dispatcher falls through to the next backend.
+    const requireTools =
+      (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+    if (requireTools) {
+      const calls = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
+      if (calls.length === 0) {
+        throw new Error(
+          "Workers AI returned no tool calls though tools were declared and " +
+            "fortune_require_tools=true. Falling through to next tier.",
+        );
+      }
+    }
+
     if (wantsStream) {
       return synthesizeToolStream(raw, req.model || model);
     }

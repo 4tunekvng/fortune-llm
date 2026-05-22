@@ -296,6 +296,23 @@ export async function callGemini(
 
   const parsed = (await upstream.json()) as GeminiResponse;
   const anthropicShape = geminiToAnthropicMessage(parsed, req.model || opts.model);
+
+  // Tool-silence detection. Consumers that *must* see tool calls (verified
+  // by `metadata.fortune_require_tools=true`) treat a text-only response
+  // as a backend weakness — throw so the dispatcher falls through to the
+  // next tier (anthropic). Default behaviour is unchanged: silence is OK
+  // when the consumer didn't opt in.
+  const requireTools =
+    Array.isArray(req.tools) &&
+    req.tools.length > 0 &&
+    (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+  if (requireTools && anthropicShape.stop_reason !== "tool_use") {
+    throw new Error(
+      "Gemini returned no tool calls though tools were declared and fortune_require_tools=true. " +
+        "Falling through to next tier.",
+    );
+  }
+
   return new Response(JSON.stringify(anthropicShape), {
     status: 200,
     headers: { "content-type": "application/json" },

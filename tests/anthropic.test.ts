@@ -48,4 +48,22 @@ describe("scrubReservedMetadata", () => {
     const body = JSON.stringify({ messages: [], metadata: null });
     expect(scrubReservedMetadata(body)).toBe(body);
   });
+
+  it("strips metadata.fortune_require_tools, leaves user_id intact", () => {
+    const body = JSON.stringify({
+      messages: [],
+      metadata: { fortune_require_tools: true, user_id: "u_123" },
+    });
+    const out = JSON.parse(scrubReservedMetadata(body));
+    expect(out.metadata).toEqual({ user_id: "u_123" });
+  });
+
+  it("strips both reserved keys when both are present", () => {
+    const body = JSON.stringify({
+      messages: [],
+      metadata: { fortune_route: "anthropic", fortune_require_tools: true, user_id: "u_123" },
+    });
+    const out = JSON.parse(scrubReservedMetadata(body));
+    expect(out.metadata).toEqual({ user_id: "u_123" });
+  });
 });
