@@ -1,10 +1,18 @@
 /**
  * Anthropic forward path. Reverse-proxies to api.anthropic.com using the
- * gateway's own ANTHROPIC_API_KEY secret. The body is forwarded as-is —
- * we don't try to mutate the user's request.
+ * gateway's own ANTHROPIC_API_KEY secret.
+ *
+ * We *almost* forward the body as-is, but we have to scrub gateway-internal
+ * metadata hints (`metadata.fortune_route`) before sending. Anthropic's API
+ * rejects unknown metadata fields with `invalid_request_error: metadata.X:
+ * Extra inputs are not permitted` — verified 2026-05-22 with sonnet-4-6.
  */
 
 const UPSTREAM = "https://api.anthropic.com";
+
+// Metadata keys the gateway reserves for its own routing. Stripped from
+// the request body before it goes upstream so Anthropic doesn't reject it.
+const RESERVED_METADATA_KEYS = ["fortune_route"];
 
 export async function forwardToAnthropic(
   request: Request,
@@ -25,10 +33,17 @@ export async function forwardToAnthropic(
   const beta = request.headers.get("anthropic-beta");
   if (beta) headers.set("anthropic-beta", beta);
 
+  // Strip gateway-internal metadata fields. Body-only requests; ignore the
+  // scrub step for GET/HEAD which carry no body.
+  let outgoingBody: string | undefined = rawBody;
+  if (request.method !== "GET" && request.method !== "HEAD" && rawBody) {
+    outgoingBody = scrubReservedMetadata(rawBody);
+  }
+
   const upstream = await fetch(upstreamUrl, {
     method: request.method,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? undefined : rawBody,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : outgoingBody,
   });
 
   // Stream the response straight back. fetch() in Workers preserves the
@@ -41,4 +56,29 @@ export async function forwardToAnthropic(
     statusText: upstream.statusText,
     headers: respHeaders,
   });
+}
+
+export function scrubReservedMetadata(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody);
+    if (parsed && typeof parsed === "object" && parsed.metadata && typeof parsed.metadata === "object") {
+      let touched = false;
+      for (const k of RESERVED_METADATA_KEYS) {
+        if (k in parsed.metadata) {
+          delete parsed.metadata[k];
+          touched = true;
+        }
+      }
+      // If metadata is now empty, drop it entirely — Anthropic accepts no
+      // metadata field, but an empty object is fine too. Either is safe.
+      if (touched && Object.keys(parsed.metadata).length === 0) {
+        delete parsed.metadata;
+      }
+      if (touched) return JSON.stringify(parsed);
+    }
+    return rawBody;
+  } catch {
+    // Not JSON or malformed — forward as-is and let upstream reject it.
+    return rawBody;
+  }
 }
