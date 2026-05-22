@@ -18,6 +18,13 @@ import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import { callGemini, DEFAULT_GEMINI_MODEL } from "./gemini.js";
+import {
+  getCircuitState,
+  isQuotaError,
+  resolveTripDurationMs,
+  tripCircuit,
+  type CircuitState,
+} from "./circuit-breaker.js";
 
 interface Env {
   AI: { run(model: string, input: unknown): Promise<unknown> };
@@ -26,7 +33,15 @@ interface Env {
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
+  // Per-backend circuit breaker. Optional: if unbound (e.g. local dev
+  // without `wrangler kv namespace create CIRCUIT`), the breaker no-ops
+  // and we fall through to the old retry-every-time behavior.
+  CIRCUIT?: KVNamespace;
+  // Override the default trip duration (1h). Value is in milliseconds.
+  CIRCUIT_TRIP_DURATION_MS?: string;
 }
+
+let circuitMissingWarned = false;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -101,10 +116,32 @@ export default {
 
     const chain: RouteChain = decideRoute(parsed);
     const errors: Array<{ tier: BackendKind; error: string }> = [];
+    const skipped: Array<{ tier: BackendKind; until: number }> = [];
+
+    if (!env.CIRCUIT && !circuitMissingWarned) {
+      circuitMissingWarned = true;
+      console.warn(
+        "fortune-llm: CIRCUIT KV namespace not bound — circuit breaker disabled. " +
+          "Run `wrangler kv namespace create CIRCUIT` and add the id to wrangler.toml.",
+      );
+    }
+    const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
 
     for (let i = 0; i < chain.tiers.length; i++) {
       const tier = chain.tiers[i];
       if (!tier) continue;
+
+      // Skip tiers whose circuit is open. Anthropic is never circuit-
+      // gated — it's opt-in and paid; if the user explicitly asked for
+      // it, give it through regardless.
+      if (tier !== "anthropic") {
+        const state: CircuitState = await getCircuitState(tier, env.CIRCUIT);
+        if (state.open && typeof state.until === "number") {
+          skipped.push({ tier, until: state.until });
+          continue;
+        }
+      }
+
       try {
         const resp = await invokeTier(tier, env, parsed, request, rawBody);
         const headers = new Headers(resp.headers);
@@ -117,15 +154,74 @@ export default {
             errors.map((e) => `${e.tier}:${e.error.slice(0, 80)}`).join(" | "),
           );
         }
+        if (skipped.length > 0) {
+          headers.set("x-fortune-llm-skipped", formatSkippedHeader(skipped));
+        }
         headers.set("access-control-allow-origin", "*");
         return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
       } catch (err) {
-        errors.push({ tier, error: errorMessage(err) });
+        const msg = errorMessage(err);
+        errors.push({ tier, error: msg });
+        // Trip the circuit on quota / rate-limit signals so subsequent
+        // requests skip this tier outright instead of repeatedly
+        // burning a fetch on a guaranteed failure.
+        if (tier !== "anthropic" && isQuotaError(err)) {
+          await tripCircuit(tier, env.CIRCUIT, tripDurationMs, msg);
+          skipped.push({ tier, until: Date.now() + tripDurationMs });
+        }
         // continue to next tier
       }
     }
 
     // Chain exhausted — fail loudly. No silent escalation to paid.
+    // If at least one tier was skipped because its circuit was open,
+    // shape the response as a quota-exhausted error so consumers can
+    // distinguish "all backends are throttled" from "all backends are
+    // broken" and back off accordingly.
+    const headers: HeadersInit = {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+    };
+    if (skipped.length > 0) {
+      (headers as Record<string, string>)["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
+    }
+
+    if (skipped.length > 0 && errors.length === 0) {
+      // Every tier in the chain had its circuit open — pure quota state.
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "quota_exhausted",
+            message: `all backends unavailable: ${skipped
+              .map((s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`)
+              .join(", ")}`,
+          },
+        }),
+        { status: 503, headers },
+      );
+    }
+
+    if (skipped.length > 0) {
+      // Mixed: some tiers skipped (quota), some failed (other reasons).
+      // Still a 503 quota_exhausted because the dominant signal is that
+      // the backends are throttled — but include the failed-tier errors
+      // so debugging is possible.
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "quota_exhausted",
+            message: `all backends unavailable: ${[
+              ...skipped.map((s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`),
+              ...errors.map((e) => `${e.tier} (error: ${e.error})`),
+            ].join(", ")}`,
+          },
+        }),
+        { status: 503, headers },
+      );
+    }
+
     return jsonError(
       503,
       "all_backends_failed",
@@ -135,6 +231,10 @@ export default {
     );
   },
 };
+
+function formatSkippedHeader(skipped: Array<{ tier: BackendKind; until: number }>): string {
+  return skipped.map((s) => `${s.tier}:${new Date(s.until).toISOString()}`).join(",");
+}
 
 async function invokeTier(
   tier: BackendKind,

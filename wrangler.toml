@@ -27,5 +27,20 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 [ai]
 binding = "AI"
 
+# Per-backend circuit breaker. Tracks which tiers have blown their
+# free-tier quota so subsequent requests skip them instead of repeatedly
+# burning a fetch on a guaranteed failure. Create the namespace once:
+#
+#   wrangler kv namespace create CIRCUIT
+#   wrangler kv namespace create CIRCUIT --preview
+#
+# Then replace the placeholders below with the printed ids. Override
+# the trip duration (default 1h) by adding to [vars]:
+#   CIRCUIT_TRIP_DURATION_MS = "1800000"   # 30 min
+[[kv_namespaces]]
+binding = "CIRCUIT"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_KV_PREVIEW_NAMESPACE_ID"
+
 [observability]
 enabled = true

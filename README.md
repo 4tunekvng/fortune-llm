@@ -77,6 +77,9 @@ npm run login                       # opens browser; one-time wrangler login
 npm run secret:set:token            # any random string; consumers send this as their API key
 npm run secret:set:gemini           # paste your free Gemini API key from AI Studio
 npm run secret:set:anthropic        # OPTIONAL — only if you want the paid escape valve enabled
+npx wrangler kv namespace create CIRCUIT             # one-time: circuit-breaker state
+npx wrangler kv namespace create CIRCUIT --preview   # one-time: preview env
+# copy the printed ids into wrangler.toml (replace REPLACE_WITH_KV_NAMESPACE_ID etc.)
 npm run deploy
 ```
 
@@ -100,6 +103,33 @@ The gateway is built around a single `BackendKind` union and a
    an `AnthropicMessagesRequest` and returns an Anthropic-shaped
    `Response` (or SSE stream).
 3. Add the new tier to the `invokeTier` switch in `src/index.ts`.
+
+## Circuit breaker
+
+When a free-tier backend (`workers-ai` or `gemini`) blows its quota or
+hits a rate limit, the gateway used to silently retry on every request —
+wasting Worker CPU and propagating latency to every consumer. Now each
+quota / rate-limit error trips a **per-backend circuit** stored in a KV
+namespace (`CIRCUIT`). While the circuit is open the dispatcher skips
+that tier entirely.
+
+| Behavior | Detail |
+|---|---|
+| Trip signals | `RESOURCE_EXHAUSTED` (Gemini), `429`, `rate limit`, `quota`, `neurons exhausted`, `daily limit exceeded` |
+| Not tripped | Timeouts, transient 5xx, network errors, `max_tokens exceeded` (those still retry) |
+| Default open duration | 1 hour. Override via `[vars] CIRCUIT_TRIP_DURATION_MS = "1800000"` (30 min). Capped at 24h. |
+| Anthropic tier | Never circuit-gated — it's explicitly opt-in and paid, the user asked for it. |
+| KV unbound | Breaker no-ops with a one-time warning; behavior reverts to the old retry-every-time chain. |
+| Response when all tiers skipped | `503` with `{"type":"error","error":{"type":"quota_exhausted","message":"all backends unavailable: workers-ai (open until <ISO>), gemini (open until <ISO>)"}}` |
+| Diagnostic header | `x-fortune-llm-skipped: workers-ai:<ISO>,gemini:<ISO>` on every response where a tier was skipped |
+
+One-time setup (also shown in [Deploy](#deploy) above):
+
+```
+npx wrangler kv namespace create CIRCUIT
+npx wrangler kv namespace create CIRCUIT --preview
+# paste the printed ids into wrangler.toml
+```
 
 ## Limitations
 
