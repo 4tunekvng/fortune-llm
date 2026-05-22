@@ -13,7 +13,8 @@
  *     into Anthropic SSE shape from a buffered non-streamed call
  *
  * What this still does NOT cover (router routes these to Gemini):
- *   - images (vision)
+ *   - images (vision) — Gemma 4 supports vision but image-block translation
+ *     from Anthropic format is not yet implemented here
  */
 
 import type {
@@ -237,10 +238,9 @@ export async function callWorkersAi(
     const raw = (await ai.run(model, nonStreamInput)) as WorkersAiChatResponse;
 
     // Tool-silence detection. Opt-in via metadata.fortune_require_tools=true.
-    // Llama-on-Workers-AI is known to ignore tools and answer in plain text
-    // when the prompt is Anthropic-shaped; consumers that need a tool call
-    // (e.g. multi-turn agent loops) get a recoverable error so the
-    // dispatcher falls through to the next backend.
+    // Gemma 4 26B A4B supports native tool calling, but consumers that need
+    // a guaranteed tool call (e.g. strict agentic loops) can set this flag
+    // so a silent plain-text response triggers a fallback to the next tier.
     const requireTools =
       (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
     if (requireTools) {

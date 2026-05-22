@@ -16,9 +16,9 @@ describe("decideRoute", () => {
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes tools[]-bearing requests gemini-first (Llama 4 Scout bounces Claude-Code-style agent prompts)", () => {
+  it("routes tools[]-bearing requests workers-ai-first (Gemma 4 26B A4B has native tool calling)", () => {
     const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
-    expect(d.tiers).toEqual(["gemini", "workers-ai"]);
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
     expect(d.tiers).not.toContain("anthropic");
     expect(d.reason).toMatch(/tools=1/);
   });
@@ -88,7 +88,7 @@ describe("decideRoute — anthropic auto-fallback", () => {
       baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }),
       { anthropicFallback: true },
     );
-    expect(d.tiers).toEqual(["gemini", "workers-ai", "anthropic"]);
+    expect(d.tiers).toEqual(["workers-ai", "gemini", "anthropic"]);
   });
 
   it("appends anthropic to a vision-only default chain", () => {

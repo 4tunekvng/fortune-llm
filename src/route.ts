@@ -4,13 +4,11 @@
  *
  * Default policy (free first, paid as last-resort):
  *   - plain text chat        →  [workers-ai, gemini]  (small model fine; save Gemini quota)
- *   - has tools[]            →  [gemini, workers-ai]  (Llama 4 Scout reliably bounces
- *                                                      Claude-Code-style agent prompts —
- *                                                      "Your input is incomplete" — so
- *                                                      complex agentic traffic prefers
- *                                                      Gemini, with Workers AI as backup
- *                                                      via the circuit-breaker fallback)
- *   - image content present  →  [gemini]              (Workers AI has no vision)
+ *   - has tools[]            →  [workers-ai, gemini]  (Gemma 4 26B A4B has native structured
+ *                                                      tool use; Gemini is the fallback when
+ *                                                      Workers AI quota trips)
+ *   - image content present  →  [gemini]              (image translation not yet implemented
+ *                                                      for Workers AI path)
  *   - very long context      →  [gemini, workers-ai]  (Gemini's window is bigger)
  *
  * When `options.anthropicFallback === true` (i.e. ANTHROPIC_API_KEY is
@@ -103,12 +101,11 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   const approxTokens = estimateInputTokens(req);
   if (approxTokens > LONG_CONTEXT_THRESHOLD) return ["gemini", "workers-ai"];
 
-  // Tools[] present → Claude-Code-style agent traffic. Llama 4 Scout
-  // reliably bounces these with "Your input is incomplete" (empirically
-  // verified 2026-05-22). Route to Gemini first; Workers AI is the
-  // fallback when Gemini's quota trips (the circuit breaker handles it).
+  // Tools[] present → Claude-Code-style agent traffic. Gemma 4 26B A4B
+  // has native structured tool use; use it first. Gemini is the fallback
+  // when Workers AI quota trips (the circuit breaker handles it).
   if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return ["gemini", "workers-ai"];
+    return ["workers-ai", "gemini"];
   }
 
   return ["workers-ai", "gemini"];
@@ -121,7 +118,7 @@ function freeChainReason(req: AnthropicMessagesRequest, chain: BackendKind[]): s
     return `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}`;
   }
   if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return `tools=${req.tools.length}; gemini handles agent prompts more reliably than workers-ai`;
+    return `tools=${req.tools.length}; workers-ai (Gemma 4) handles tool use natively`;
   }
   return chain[0] === "workers-ai"
     ? "plain text chat; workers-ai default"

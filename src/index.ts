@@ -51,7 +51,7 @@ export default {
       return new Response(
         JSON.stringify({
           ok: true,
-          oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct",
+          oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it",
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
           gemini_configured: Boolean(env.GEMINI_API_KEY),
           anthropic_configured: Boolean(env.ANTHROPIC_API_KEY),
@@ -246,7 +246,7 @@ async function invokeTier(
   rawBody: string,
 ): Promise<Response> {
   if (tier === "workers-ai") {
-    const model = env.DEFAULT_OSS_MODEL ?? "@cf/meta/llama-4-scout-17b-16e-instruct";
+    const model = env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it";
     const resp = await callWorkersAi(env.AI, model, parsed);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
