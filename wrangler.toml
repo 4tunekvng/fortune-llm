@@ -11,18 +11,20 @@ compatibility_flags = ["nodejs_compat"]
 DEFAULT_OSS_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
-# Free-by-default chain. Paid Anthropic is opt-in only via the consumer
-# request setting `metadata.fortune_route="anthropic"`. The three secrets
-# below are set with `wrangler secret put`:
+# Free-first chain with paid Anthropic as auto-last-resort. The three
+# secrets below are set with `wrangler secret put`:
 #
 #   wrangler secret put GATEWAY_TOKEN     # required — token consumer apps send
 #   wrangler secret put GEMINI_API_KEY    # recommended — enables Gemini tier (free)
-#   wrangler secret put ANTHROPIC_API_KEY # optional — only needed for the paid escape valve
+#   wrangler secret put ANTHROPIC_API_KEY # recommended — used as last-resort when
+#                                         # every free tier has failed or been
+#                                         # circuit-broken. Omit to keep the gateway
+#                                         # free-only (503s on free-chain exhaustion).
 #
 # If GEMINI_API_KEY is missing, requests that would have used Gemini fall
-# through to the next tier in the chain (or fail if Gemini is the only
-# tier). If ANTHROPIC_API_KEY is missing, requests with
-# metadata.fortune_route="anthropic" return a 503.
+# through to the next tier in the chain. If ANTHROPIC_API_KEY is missing,
+# auto-fallback is simply disabled — the gateway behaves like the previous
+# "zero-paid" policy. Per-request opt-out: metadata.fortune_route="free".
 
 [ai]
 binding = "AI"

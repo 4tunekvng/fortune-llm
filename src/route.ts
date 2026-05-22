@@ -1,8 +1,8 @@
 /**
- * Per-request routing decision: an ordered fallback chain of free
- * backends. The dispatcher tries them in order until one succeeds.
+ * Per-request routing decision: an ordered fallback chain. The dispatcher
+ * tries each tier in order until one succeeds.
  *
- * Default policy (zero-paid):
+ * Default policy (free first, paid as last-resort):
  *   - plain text chat        →  [workers-ai, gemini]  (small model fine; save Gemini quota)
  *   - has tools[]            →  [gemini, workers-ai]  (Llama 4 Scout reliably bounces
  *                                                      Claude-Code-style agent prompts —
@@ -13,14 +13,25 @@
  *   - image content present  →  [gemini]              (Workers AI has no vision)
  *   - very long context      →  [gemini, workers-ai]  (Gemini's window is bigger)
  *
+ * When `options.anthropicFallback === true` (i.e. ANTHROPIC_API_KEY is
+ * configured on the worker), Anthropic is appended as the last-resort
+ * tier to every default chain. The free tiers are still tried first; we
+ * only escalate to paid when *every* free option has failed or is
+ * circuit-broken. This is what makes the gateway "always works" for
+ * consumers — Lena, knox, the agents — even when free quotas are dry.
+ *
  * Explicit per-request overrides via `metadata.fortune_route`:
- *   - "anthropic"   →  [anthropic]   (escape valve — paid)
+ *   - "anthropic"   →  [anthropic]                    (force paid)
+ *   - "free"        →  [workers-ai, gemini] (or rule-derived equivalent)
+ *                                                    (free-only, no paid fallback,
+ *                                                     even if anthropic is configured)
  *   - "workers-ai"  →  [workers-ai]
  *   - "gemini"      →  [gemini]
  *
  * When the chain is exhausted (every tier failed or rate-limited) the
- * gateway fails loudly. There is intentionally no silent escalation to
- * paid Anthropic.
+ * gateway fails loudly with a 503. Auto-fallback to Anthropic only kicks
+ * in when the *worker* has an Anthropic key — there is no silent
+ * escalation if the operator hasn't opted in by configuring it.
  */
 
 import type { AnthropicMessagesRequest, AnthropicContentBlock } from "./types.js";
@@ -32,11 +43,25 @@ export interface RouteChain {
   reason: string;
 }
 
+export interface DecideRouteOptions {
+  /**
+   * Worker has ANTHROPIC_API_KEY configured. When true, Anthropic is
+   * appended to every default (non-explicit-override) chain as the
+   * last-resort tier, used only when every free tier has failed or
+   * been circuit-broken.
+   */
+  anthropicFallback?: boolean;
+}
+
 const LONG_CONTEXT_THRESHOLD = 100_000;
 
-export function decideRoute(req: AnthropicMessagesRequest): RouteChain {
+export function decideRoute(
+  req: AnthropicMessagesRequest,
+  options: DecideRouteOptions = {},
+): RouteChain {
   const meta = req.metadata as { fortune_route?: string } | undefined;
 
+  // Explicit per-request overrides — these short-circuit the auto-fallback.
   if (meta?.fortune_route === "anthropic") {
     return { tiers: ["anthropic"], reason: "explicit metadata.fortune_route=anthropic" };
   }
@@ -46,31 +71,61 @@ export function decideRoute(req: AnthropicMessagesRequest): RouteChain {
   if (meta?.fortune_route === "gemini") {
     return { tiers: ["gemini"], reason: "explicit metadata.fortune_route=gemini" };
   }
-
-  if (containsImage(req)) {
-    return { tiers: ["gemini"], reason: "image content block present" };
-  }
-
-  const approxTokens = estimateInputTokens(req);
-  if (approxTokens > LONG_CONTEXT_THRESHOLD) {
+  // "free" forces the default free chain even when anthropicFallback is on.
+  // Lets a caller opt out of paid escalation per-request (e.g. background
+  // jobs that should fail gracefully rather than burn dollars).
+  if (meta?.fortune_route === "free") {
     return {
-      tiers: ["gemini", "workers-ai"],
-      reason: `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}`,
+      tiers: defaultFreeChain(req),
+      reason: "explicit metadata.fortune_route=free (no paid fallback)",
     };
   }
+
+  const free = defaultFreeChain(req);
+  const baseReason = freeChainReason(req, free);
+  if (options.anthropicFallback) {
+    return {
+      tiers: [...free, "anthropic"],
+      reason: `${baseReason}; anthropic appended as last-resort (free chain failed → paid)`,
+    };
+  }
+  return { tiers: free, reason: baseReason };
+}
+
+/**
+ * The free-only chain for a given request shape. Pure: no env, no options.
+ * Use this both as the default chain and as the result for the `free`
+ * metadata override.
+ */
+function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
+  if (containsImage(req)) return ["gemini"];
+
+  const approxTokens = estimateInputTokens(req);
+  if (approxTokens > LONG_CONTEXT_THRESHOLD) return ["gemini", "workers-ai"];
 
   // Tools[] present → Claude-Code-style agent traffic. Llama 4 Scout
   // reliably bounces these with "Your input is incomplete" (empirically
   // verified 2026-05-22). Route to Gemini first; Workers AI is the
   // fallback when Gemini's quota trips (the circuit breaker handles it).
   if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return {
-      tiers: ["gemini", "workers-ai"],
-      reason: `tools=${req.tools.length}; gemini handles agent prompts more reliably than workers-ai`,
-    };
+    return ["gemini", "workers-ai"];
   }
 
-  return { tiers: ["workers-ai", "gemini"], reason: "plain text chat; workers-ai default" };
+  return ["workers-ai", "gemini"];
+}
+
+function freeChainReason(req: AnthropicMessagesRequest, chain: BackendKind[]): string {
+  if (containsImage(req)) return "image content block present";
+  const approxTokens = estimateInputTokens(req);
+  if (approxTokens > LONG_CONTEXT_THRESHOLD) {
+    return `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}`;
+  }
+  if (Array.isArray(req.tools) && req.tools.length > 0) {
+    return `tools=${req.tools.length}; gemini handles agent prompts more reliably than workers-ai`;
+  }
+  return chain[0] === "workers-ai"
+    ? "plain text chat; workers-ai default"
+    : `default free chain ${chain.join(", ")}`;
 }
 
 function containsImage(req: AnthropicMessagesRequest): boolean {

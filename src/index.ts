@@ -114,7 +114,9 @@ export default {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must be a positive integer.");
     }
 
-    const chain: RouteChain = decideRoute(parsed);
+    const chain: RouteChain = decideRoute(parsed, {
+      anthropicFallback: Boolean(env.ANTHROPIC_API_KEY),
+    });
     const errors: Array<{ tier: BackendKind; error: string }> = [];
     const skipped: Array<{ tier: BackendKind; until: number }> = [];
 

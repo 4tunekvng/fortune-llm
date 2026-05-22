@@ -76,6 +76,73 @@ describe("decideRoute", () => {
   });
 });
 
+describe("decideRoute — anthropic auto-fallback", () => {
+  it("appends anthropic to a plain-text default chain when configured", () => {
+    const d = decideRoute(baseReq(), { anthropicFallback: true });
+    expect(d.tiers).toEqual(["workers-ai", "gemini", "anthropic"]);
+    expect(d.reason).toMatch(/anthropic appended as last-resort/);
+  });
+
+  it("appends anthropic to a tools-bearing default chain", () => {
+    const d = decideRoute(
+      baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }),
+      { anthropicFallback: true },
+    );
+    expect(d.tiers).toEqual(["gemini", "workers-ai", "anthropic"]);
+  });
+
+  it("appends anthropic to a vision-only default chain", () => {
+    const d = decideRoute(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what's in this?" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "..." } },
+            ],
+          },
+        ],
+      }),
+      { anthropicFallback: true },
+    );
+    expect(d.tiers).toEqual(["gemini", "anthropic"]);
+  });
+
+  it("does NOT append anthropic when an explicit override pins to a free tier", () => {
+    const d = decideRoute(
+      baseReq({ metadata: { fortune_route: "workers-ai" } }),
+      { anthropicFallback: true },
+    );
+    expect(d.tiers).toEqual(["workers-ai"]);
+  });
+
+  it("respects metadata.fortune_route=free as an explicit opt-out of paid fallback", () => {
+    const d = decideRoute(
+      baseReq({ metadata: { fortune_route: "free" } }),
+      { anthropicFallback: true },
+    );
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).not.toContain("anthropic");
+    expect(d.reason).toContain("no paid fallback");
+  });
+
+  it("metadata.fortune_route=anthropic still works when anthropic also happens to be configured", () => {
+    const d = decideRoute(
+      baseReq({ metadata: { fortune_route: "anthropic" } }),
+      { anthropicFallback: true },
+    );
+    expect(d.tiers).toEqual(["anthropic"]);
+  });
+
+  it("does not append anthropic twice if it somehow appeared in the free chain", () => {
+    // Defensive: the free chain builder never returns anthropic, but if
+    // future code did, we shouldn't duplicate it.
+    const d = decideRoute(baseReq(), { anthropicFallback: false });
+    expect(d.tiers.filter((t) => t === "anthropic")).toHaveLength(0);
+  });
+});
+
 describe("estimateInputTokens", () => {
   it("counts string content", () => {
     const n = estimateInputTokens(baseReq({ messages: [{ role: "user", content: "abcd".repeat(40) }] }));

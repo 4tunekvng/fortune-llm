@@ -1,19 +1,25 @@
 # fortune-llm
 
 A Cloudflare Worker that exposes the **Anthropic Messages API** and
-routes requests through a free-by-default fallback chain:
+routes through a free-first fallback chain — paid Anthropic is the
+last-resort tier appended automatically when the worker has an
+`ANTHROPIC_API_KEY` configured.
 
 ```
-                ┌─────────────────────────────────────────────────────────┐
-POST /v1/messages   decideRoute(body)                                      │
-                ├─────────────────────────────────────────────────────────┤
-                │ default                  →  [workers-ai, gemini]         │
-                │ image content present    →  [gemini]                     │
-                │ very long context        →  [gemini, workers-ai]         │
-                │ metadata.fortune_route="anthropic"  →  [anthropic]       │
-                │ metadata.fortune_route="workers-ai" →  [workers-ai]      │
-                │ metadata.fortune_route="gemini"     →  [gemini]          │
-                └─────────────────────────────────────────────────────────┘
+                ┌─────────────────────────────────────────────────────────────┐
+POST /v1/messages   decideRoute(body, { anthropicFallback })                   │
+                ├─────────────────────────────────────────────────────────────┤
+                │ default                  →  [workers-ai, gemini, *anthropic] │
+                │ image content present    →  [gemini, *anthropic]             │
+                │ very long context        →  [gemini, workers-ai, *anthropic] │
+                │ tools[] present          →  [gemini, workers-ai, *anthropic] │
+                │                                                              │
+                │ metadata.fortune_route="anthropic"  →  [anthropic]           │
+                │ metadata.fortune_route="free"       →  free chain only       │
+                │ metadata.fortune_route="workers-ai" →  [workers-ai]          │
+                │ metadata.fortune_route="gemini"     →  [gemini]              │
+                └─────────────────────────────────────────────────────────────┘
+                  * anthropic appended ONLY when ANTHROPIC_API_KEY is configured
                                    │
                                    ▼
                         Try each tier in order. First one
@@ -33,18 +39,28 @@ ANTHROPIC_BASE_URL=https://fortune-llm.<your-cf-account>.workers.dev
 ANTHROPIC_API_KEY=<gateway-token>            # not an Anthropic key
 ```
 
-**Policy:** zero paid Anthropic by default. Paid Anthropic is opt-in
-only via the consumer request setting `metadata.fortune_route="anthropic"`.
-When the free chain is exhausted, the gateway returns a 503 — *no
-silent escalation to paid*.
+**Policy:** free first, paid as last-resort.
+
+- The default chain always tries free tiers (Workers AI, Gemini) first.
+- When `ANTHROPIC_API_KEY` is configured on the worker, Anthropic is
+  appended as the **last-resort tier** to every default chain. We only
+  ever escalate to paid after every free tier has failed or been
+  circuit-broken.
+- If the worker has no `ANTHROPIC_API_KEY`, the gateway fails loudly
+  with 503 when the free chain is exhausted — *no silent escalation*.
+- Callers that want to opt out of paid escalation per-request can pass
+  `metadata.fortune_route="free"`; that locks the chain to free-only
+  even when Anthropic is available.
+- Callers that want to force paid for a specific request can pass
+  `metadata.fortune_route="anthropic"` (single-tier chain).
 
 ## Backends
 
-| Tier | Model | Cost | Capabilities |
-|------|-------|------|--------------|
-| `workers-ai` | `@cf/meta/llama-4-scout-17b-16e-instruct` (configurable) | Free up to 10k neurons/day | Text, tool use, long-ish context |
-| `gemini` | `gemini-2.5-flash` (configurable) | Free up to API rate caps | Text, tool use, vision, long context |
-| `anthropic` | Whatever the caller asked for | Paid | Frontier — only when explicitly opted into |
+| Tier | Model | Cost | Capabilities | Auto-fallback? |
+|------|-------|------|--------------|----------------|
+| `workers-ai` | `@cf/meta/llama-4-scout-17b-16e-instruct` (configurable) | Free up to 10k neurons/day | Text, tool use, long-ish context | yes |
+| `gemini` | `gemini-2.5-flash` (configurable) | Free up to API rate caps | Text, tool use, vision, long context | yes |
+| `anthropic` | Whatever the caller asked for | Paid | Frontier | Last-resort. Appended automatically when `ANTHROPIC_API_KEY` is configured; can also be forced via `metadata.fortune_route="anthropic"`. |
 
 Diagnostic headers on every response:
 
