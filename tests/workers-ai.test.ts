@@ -97,6 +97,26 @@ describe("buildWorkersAiInput", () => {
     });
   });
 
+  it("forwards stop_sequences as the OpenAI stop field", () => {
+    const input = buildWorkersAiInput({
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      stop_sequences: ["<END>", "\n\nHuman:"],
+    });
+    expect(input.stop).toEqual(["<END>", "\n\nHuman:"]);
+  });
+
+  it("omits stop when stop_sequences is empty", () => {
+    const input = buildWorkersAiInput({
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      stop_sequences: [],
+    });
+    expect(input.stop).toBeUndefined();
+  });
+
   it("clamps non-finite max_tokens to a sane default", () => {
     const input = buildWorkersAiInput({
       model: "claude-sonnet-4-6",

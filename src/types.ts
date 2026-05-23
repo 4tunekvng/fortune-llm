@@ -94,6 +94,8 @@ export interface WorkersAiChatRequest {
   top_p?: number;
   top_k?: number;
   stream?: boolean;
+  /** OpenAI-style stop sequences (up to 4). Forwarded to Groq, OpenRouter, and Workers AI. */
+  stop?: string | string[];
 }
 
 export interface WorkersAiChatMessage {

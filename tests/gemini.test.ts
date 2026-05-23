@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   buildGeminiInput,
   translateToolsToGemini,
+  translateToolChoiceToGemini,
   sanitizeJsonSchemaForGemini,
   geminiToAnthropicMessage,
   requestHasImage,
@@ -223,6 +224,55 @@ describe("translateToolsToGemini", () => {
   });
 });
 
+describe("translateToolChoiceToGemini", () => {
+  it("maps auto → AUTO", () => {
+    expect(translateToolChoiceToGemini({ type: "auto" })).toEqual({
+      functionCallingConfig: { mode: "AUTO" },
+    });
+  });
+
+  it("maps any → ANY", () => {
+    expect(translateToolChoiceToGemini({ type: "any" })).toEqual({
+      functionCallingConfig: { mode: "ANY" },
+    });
+  });
+
+  it("maps none → NONE", () => {
+    expect(translateToolChoiceToGemini({ type: "none" })).toEqual({
+      functionCallingConfig: { mode: "NONE" },
+    });
+  });
+
+  it("maps tool:{name} → ANY with allowedFunctionNames", () => {
+    expect(translateToolChoiceToGemini({ type: "tool", name: "search" })).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["search"] },
+    });
+  });
+
+  it("returns null when choice is undefined", () => {
+    expect(translateToolChoiceToGemini(undefined)).toBeNull();
+  });
+
+  it("buildGeminiInput sets toolConfig when tools + tool_choice are present", () => {
+    const out = buildGeminiInput(
+      baseReq({
+        tools: [{ name: "search", input_schema: { type: "object" } }],
+        tool_choice: { type: "any" },
+      }),
+    );
+    expect(out.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY" } });
+  });
+
+  it("buildGeminiInput omits toolConfig when tools are present but tool_choice is not set", () => {
+    const out = buildGeminiInput(
+      baseReq({
+        tools: [{ name: "search", input_schema: { type: "object" } }],
+      }),
+    );
+    expect(out.toolConfig).toBeUndefined();
+  });
+});
+
 describe("geminiToAnthropicMessage", () => {
   it("converts a text-only Gemini candidate to an Anthropic Message", () => {
     const gem: GeminiResponse = {
@@ -276,6 +326,19 @@ describe("geminiToAnthropicMessage", () => {
     };
     const msg = geminiToAnthropicMessage(gem, "claude-sonnet-4-6");
     expect(msg.stop_reason).toBe("max_tokens");
+  });
+
+  it("maps Gemini STOP_SEQUENCE to Anthropic stop_sequence stop_reason", () => {
+    const gem: GeminiResponse = {
+      candidates: [
+        {
+          content: { parts: [{ text: "partial answer" }] },
+          finishReason: "STOP_SEQUENCE",
+        },
+      ],
+    };
+    const msg = geminiToAnthropicMessage(gem, "claude-sonnet-4-6");
+    expect(msg.stop_reason).toBe("stop_sequence");
   });
 
   it("provides an empty content block when Gemini returns no parts", () => {
@@ -528,6 +591,16 @@ describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", (
       | { delta?: { stop_reason?: string } }
       | undefined;
     expect(delta?.delta?.stop_reason).toBe("tool_use");
+  });
+
+  it("emits stop_reason=stop_sequence when finishReason is STOP_SEQUENCE", async () => {
+    const upstream = makeUpstream([{ text: "partial response" }], "STOP_SEQUENCE");
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const events = await consumeDownstream(resp);
+    const delta = events.find((e) => e.type === "message_delta") as
+      | { delta?: { stop_reason?: string } }
+      | undefined;
+    expect(delta?.delta?.stop_reason).toBe("stop_sequence");
   });
 });
 

@@ -139,6 +139,9 @@ export function buildWorkersAiInput(req: AnthropicMessagesRequest): WorkersAiCha
     top_p: typeof req.top_p === "number" ? req.top_p : undefined,
     top_k: typeof req.top_k === "number" ? req.top_k : undefined,
     stream: Boolean(req.stream),
+    ...(Array.isArray(req.stop_sequences) && req.stop_sequences.length > 0
+      ? { stop: req.stop_sequences }
+      : {}),
   };
 }
 

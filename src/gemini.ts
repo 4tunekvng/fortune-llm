@@ -19,6 +19,7 @@ import type {
   AnthropicResponseContentBlock,
   AnthropicStopReason,
   AnthropicTool,
+  AnthropicToolChoice,
   GeminiGenerateRequest,
   GeminiContent,
   GeminiPart,
@@ -88,9 +89,44 @@ export function buildGeminiInput(req: AnthropicMessagesRequest): GeminiGenerateR
 
   if (Array.isArray(req.tools) && req.tools.length > 0) {
     out.tools = [{ functionDeclarations: translateToolsToGemini(req.tools) }];
+    const toolConfig = translateToolChoiceToGemini(req.tool_choice);
+    if (toolConfig) {
+      out.toolConfig = toolConfig;
+    }
   }
 
   return out;
+}
+
+/**
+ * Translate Anthropic's tool_choice into Gemini's toolConfig.functionCallingConfig.
+ *
+ * Mapping:
+ *   auto   → AUTO  (Gemini decides whether/which tool to use)
+ *   any    → ANY   (Gemini must call a tool; any of the declared ones)
+ *   none   → NONE  (No tool use; plain text response)
+ *   {type:"tool", name:"X"} → ANY with allowedFunctionNames=["X"]
+ */
+export function translateToolChoiceToGemini(
+  choice: AnthropicToolChoice | undefined,
+): { functionCallingConfig: { mode: "AUTO" | "ANY" | "NONE"; allowedFunctionNames?: string[] } } | null {
+  if (!choice) return null;
+  const c = choice as { type?: string; name?: string };
+  switch (c.type) {
+    case "auto":
+      return { functionCallingConfig: { mode: "AUTO" } };
+    case "any":
+      return { functionCallingConfig: { mode: "ANY" } };
+    case "none":
+      return { functionCallingConfig: { mode: "NONE" } };
+    case "tool":
+      if (typeof c.name === "string") {
+        return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [c.name] } };
+      }
+      return { functionCallingConfig: { mode: "ANY" } };
+    default:
+      return null;
+  }
 }
 
 export function translateToolsToGemini(tools: AnthropicTool[]) {
@@ -453,6 +489,8 @@ export function geminiToAnthropicMessage(
     stopReason = "tool_use";
   } else if (candidate?.finishReason === "MAX_TOKENS") {
     stopReason = "max_tokens";
+  } else if (candidate?.finishReason === "STOP_SEQUENCE") {
+    stopReason = "stop_sequence";
   } else if (candidate?.finishReason === "STOP" || candidate?.finishReason === undefined) {
     stopReason = "end_turn";
   }
@@ -579,6 +617,7 @@ export function streamGeminiAsAnthropic(
           closeCurrentBlock();
           let stopReason: AnthropicStopReason = "end_turn";
           if (finishReason === "MAX_TOKENS") stopReason = "max_tokens";
+          if (finishReason === "STOP_SEQUENCE") stopReason = "stop_sequence";
           // tool_use takes precedence over end_turn. Consumer runners
           // (e.g. Anthropic SDK's `messages.stream()`) branch on the
           // accumulated stop_reason to decide whether to execute the
