@@ -131,6 +131,9 @@ export default {
     if (!parsed || !Array.isArray(parsed.messages)) {
       return jsonError(400, "invalid_request_error", "Field 'messages' must be an array.");
     }
+    if (parsed.messages.length === 0) {
+      return jsonError(400, "invalid_request_error", "Field 'messages' must not be empty.");
+    }
     if (
       typeof parsed.max_tokens !== "number" ||
       !Number.isFinite(parsed.max_tokens) ||
