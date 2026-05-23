@@ -141,6 +141,32 @@ describe("decideRoute — anthropic auto-fallback", () => {
     const d = decideRoute(baseReq(), { anthropicFallback: false });
     expect(d.tiers.filter((t) => t === "anthropic")).toHaveLength(0);
   });
+
+  it("routes requests with output_config (json_schema) directly to anthropic when configured", () => {
+    // messages.parse() helper from the SDK sets output_config.format.type=json_schema.
+    // Free backends don't understand this field and return code-fenced JSON which
+    // the SDK's text-mode parser then chokes on. Skip the free tiers entirely.
+    const req = {
+      ...baseReq(),
+      output_config: {
+        format: { type: "json_schema", schema: { type: "object", properties: { title: { type: "string" } } } },
+      },
+    } as unknown as AnthropicMessagesRequest;
+    const d = decideRoute(req, { anthropicFallback: true });
+    expect(d.tiers).toEqual(["anthropic"]);
+    expect(d.reason).toMatch(/output_config/);
+  });
+
+  it("falls through to free chain when output_config is present but anthropic not configured (fails loud)", () => {
+    const req = {
+      ...baseReq(),
+      output_config: {
+        format: { type: "json_schema", schema: {} },
+      },
+    } as unknown as AnthropicMessagesRequest;
+    const d = decideRoute(req, { anthropicFallback: false });
+    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+  });
 });
 
 describe("estimateInputTokens", () => {

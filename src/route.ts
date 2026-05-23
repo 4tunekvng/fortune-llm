@@ -10,6 +10,11 @@
  *   - image content present  →  [gemini]              (image translation not yet implemented
  *                                                      for Workers AI path)
  *   - very long context      →  [gemini, workers-ai]  (Gemini's window is bigger)
+ *   - has output_config      →  [anthropic]           (json_schema structured output is an
+ *                                                      Anthropic-native SDK feature — free
+ *                                                      backends don't understand the field
+ *                                                      and return code-fenced JSON that the
+ *                                                      SDK's text parser then chokes on)
  *
  * When `options.anthropicFallback === true` (i.e. ANTHROPIC_API_KEY is
  * configured on the worker), Anthropic is appended as the last-resort
@@ -79,6 +84,21 @@ export function decideRoute(
     };
   }
 
+  // Anthropic-native SDK features — free backends don't speak them.
+  // `output_config` is the messages.parse() structured-output helper.
+  // Forwarding it to Workers AI / Gemini returns code-fenced JSON which
+  // the SDK's text-mode parser then rejects. Skip straight to Anthropic.
+  if (hasOutputConfig(req)) {
+    if (options.anthropicFallback) {
+      return {
+        tiers: ["anthropic"],
+        reason: "output_config (json_schema structured output) — Anthropic-native, free tiers don't support it",
+      };
+    }
+    // No paid backend configured — fall through to default and let the
+    // free tiers fail loudly rather than silently producing bad JSON.
+  }
+
   const free = defaultFreeChain(req);
   const baseReason = freeChainReason(req, free);
   if (options.anthropicFallback) {
@@ -88,6 +108,11 @@ export function decideRoute(
     };
   }
   return { tiers: free, reason: baseReason };
+}
+
+function hasOutputConfig(req: AnthropicMessagesRequest): boolean {
+  const oc = (req as { output_config?: { format?: { type?: string } } }).output_config;
+  return oc?.format?.type === "json_schema";
 }
 
 /**
