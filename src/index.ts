@@ -137,6 +137,9 @@ export default {
     ) {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must be a positive integer.");
     }
+    if (parsed.max_tokens > 65536) {
+      return jsonError(400, "invalid_request_error", "Field 'max_tokens' must not exceed 65536.");
+    }
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: Boolean(env.ANTHROPIC_API_KEY),
