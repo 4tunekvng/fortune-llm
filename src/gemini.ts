@@ -265,6 +265,92 @@ function clampMaxTokens(requested: number): number {
   return requested;
 }
 
+/**
+ * Resolve a comma-separated list of Gemini API keys from env. Accepts
+ * either `GEMINI_API_KEYS` (plural) or the legacy `GEMINI_API_KEY`
+ * (singular). Returns deduped, trimmed, non-empty keys.
+ */
+export function resolveGeminiKeys(plural: string | undefined, singular: string | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (k: string) => {
+    const t = k.trim();
+    if (!t) return;
+    if (seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  if (plural) {
+    for (const k of plural.split(",")) push(k);
+  }
+  if (singular) push(singular);
+  return out;
+}
+
+/**
+ * Call Gemini with key rotation. Tries keys in randomized order. A quota
+ * / rate-limit failure on one key falls through to the next; any non-
+ * quota failure (4xx auth/config, 5xx, network) is thrown immediately
+ * because it isn't a key-specific issue — the outer dispatcher will
+ * fall to the next tier (workers-ai / openrouter / anthropic).
+ *
+ * If every key returns a quota error, the last quota error is rethrown
+ * so the tier-level circuit-breaker trips for the whole gemini tier
+ * (the only remaining option is to wait for quotas to refresh).
+ *
+ * Why randomize and not round-robin: round-robin needs per-Worker
+ * state, which is unreliable on Cloudflare's request-isolation model.
+ * Randomization gets roughly the same load distribution at zero coord
+ * cost.
+ */
+export async function callGeminiWithRotation(
+  keys: string[],
+  model: string,
+  req: AnthropicMessagesRequest,
+  isQuotaError: (err: unknown) => boolean,
+): Promise<Response> {
+  if (keys.length === 0) {
+    throw new Error("GEMINI_API_KEY not configured");
+  }
+  const shuffled = shuffleKeys(keys);
+  let lastQuotaError: unknown = null;
+  for (const apiKey of shuffled) {
+    try {
+      return await callGemini({ apiKey, model }, req);
+    } catch (err) {
+      if (isQuotaError(err)) {
+        lastQuotaError = err;
+        continue;
+      }
+      // Non-quota error — same problem would hit every key (auth / model
+      // / request shape) or it's a transient upstream that this tier as
+      // a whole should bail on so the dispatcher tries another tier.
+      throw err;
+    }
+  }
+  // All keys quota-burned. Re-throw the most recent so the outer
+  // dispatcher trips the tier circuit.
+  throw lastQuotaError instanceof Error
+    ? lastQuotaError
+    : new Error("All Gemini keys exhausted (rate limit / quota)");
+}
+
+function shuffleKeys<T>(arr: T[]): T[] {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    // crypto.getRandomValues for proper randomness in the Worker runtime.
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    const r = buf[0] ?? 0;
+    const j = r % (i + 1);
+    const a = out[i] as T;
+    const b = out[j] as T;
+    out[i] = b;
+    out[j] = a;
+  }
+  return out;
+}
+
 export async function callGemini(
   opts: CallGeminiOptions,
   req: AnthropicMessagesRequest,

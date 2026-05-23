@@ -17,7 +17,13 @@ import { authenticate } from "./auth.js";
 import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
-import { callGemini, DEFAULT_GEMINI_MODEL } from "./gemini.js";
+import {
+  callGeminiWithRotation,
+  DEFAULT_GEMINI_MODEL,
+  resolveGeminiKeys,
+} from "./gemini.js";
+import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
+import { callOpenRouter, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
 import {
   getCircuitState,
   isQuotaError,
@@ -29,10 +35,19 @@ import {
 interface Env {
   AI: { run(model: string, input: unknown): Promise<unknown> };
   ANTHROPIC_API_KEY?: string;
+  /** Legacy single-key form for Gemini. */
   GEMINI_API_KEY?: string;
+  /** Comma-separated multi-key form for Gemini. Each key gives independent quota. */
+  GEMINI_API_KEYS?: string;
+  /** Groq API key (https://console.groq.com/keys). Free tier with native tool use. */
+  GROQ_API_KEY?: string;
+  /** OpenRouter API key (https://openrouter.ai/keys). Free tier via :free models. */
+  OPENROUTER_API_KEY?: string;
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
+  DEFAULT_GROQ_MODEL?: string;
+  DEFAULT_OPENROUTER_MODEL?: string;
   // Per-backend circuit breaker. Optional: if unbound (e.g. local dev
   // without `wrangler kv namespace create CIRCUIT`), the breaker no-ops
   // and we fall through to the old retry-every-time behavior.
@@ -48,13 +63,22 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/healthz") {
+      const geminiKeys = resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
       return new Response(
         JSON.stringify({
           ok: true,
           oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it",
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
-          gemini_configured: Boolean(env.GEMINI_API_KEY),
-          anthropic_configured: Boolean(env.ANTHROPIC_API_KEY),
+          groq_model: env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
+          openrouter_model: env.DEFAULT_OPENROUTER_MODEL ?? DEFAULT_OPENROUTER_MODEL,
+          backends: {
+            "workers-ai": true, // bound by the AI binding, always available
+            gemini: geminiKeys.length > 0,
+            gemini_key_count: geminiKeys.length,
+            groq: Boolean(env.GROQ_API_KEY),
+            openrouter: Boolean(env.OPENROUTER_API_KEY),
+            anthropic: Boolean(env.ANTHROPIC_API_KEY),
+          },
         }),
         { headers: { "content-type": "application/json" } },
       );
@@ -253,16 +277,42 @@ async function invokeTier(
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   if (tier === "gemini") {
-    if (!env.GEMINI_API_KEY) {
+    const keys = resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
+    if (keys.length === 0) {
       throw new Error("GEMINI_API_KEY not configured");
     }
     const model = env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
-    const resp = await callGemini({ apiKey: env.GEMINI_API_KEY, model }, parsed);
+    const resp = await callGeminiWithRotation(keys, model, parsed, isQuotaError);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    if (keys.length > 1) {
+      headers.set("x-fortune-llm-gemini-keys", String(keys.length));
+    }
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  if (tier === "groq") {
+    if (!env.GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY not configured");
+    }
+    const model = env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
+    const resp = await callGroq({ apiKey: env.GROQ_API_KEY, model }, parsed);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
-  // tier === "anthropic" — paid escape valve. Only reached via explicit metadata override.
+  if (tier === "openrouter") {
+    if (!env.OPENROUTER_API_KEY) {
+      throw new Error("OPENROUTER_API_KEY not configured");
+    }
+    const model = env.DEFAULT_OPENROUTER_MODEL ?? DEFAULT_OPENROUTER_MODEL;
+    const resp = await callOpenRouter({ apiKey: env.OPENROUTER_API_KEY, model }, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  // tier === "anthropic" — paid escape valve. Auto-appended when ANTHROPIC_API_KEY
+  // is configured (free chain failed → paid), or reached via explicit metadata
+  // override.
   if (!env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }

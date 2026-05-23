@@ -3,28 +3,29 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Default OSS model used by the Workers AI tier. Override per-deploy via
-# DEFAULT_OSS_MODEL if you want to A/B another OSS model.
-# Default Gemini model used by the Gemini tier. Override via
-# DEFAULT_GEMINI_MODEL.
+# Default model per tier. Override any of these in this file to A/B
+# without code changes.
 [vars]
 DEFAULT_OSS_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
-# Free-first chain with paid Anthropic as auto-last-resort. The three
-# secrets below are set with `wrangler secret put`:
+# Free-first chain with paid Anthropic as auto-last-resort. Each free
+# provider is an independent quota pool, so the more keys you have set,
+# the higher the daily ceiling before anthropic is reached.
 #
-#   wrangler secret put GATEWAY_TOKEN     # required — token consumer apps send
-#   wrangler secret put GEMINI_API_KEY    # recommended — enables Gemini tier (free)
-#   wrangler secret put ANTHROPIC_API_KEY # recommended — used as last-resort when
-#                                         # every free tier has failed or been
-#                                         # circuit-broken. Omit to keep the gateway
-#                                         # free-only (503s on free-chain exhaustion).
+#   wrangler secret put GATEWAY_TOKEN       # required — token consumer apps send
+#   wrangler secret put GROQ_API_KEY        # recommended — free, fastest, native tool use
+#   wrangler secret put GEMINI_API_KEYS     # recommended — comma-separated for key rotation
+#                                           # (or GEMINI_API_KEY for a single key)
+#   wrangler secret put OPENROUTER_API_KEY  # recommended — independent free-quota pool
+#   wrangler secret put ANTHROPIC_API_KEY   # optional — last-resort when every free
+#                                           # tier is exhausted. Omit to make the
+#                                           # gateway free-only (503s when dry).
 #
-# If GEMINI_API_KEY is missing, requests that would have used Gemini fall
-# through to the next tier in the chain. If ANTHROPIC_API_KEY is missing,
-# auto-fallback is simply disabled — the gateway behaves like the previous
-# "zero-paid" policy. Per-request opt-out: metadata.fortune_route="free".
+# Any unset key disables only its own tier; the chain skips and continues.
+# Per-request opt-out of paid: metadata.fortune_route="free".
 
 [ai]
 binding = "AI"

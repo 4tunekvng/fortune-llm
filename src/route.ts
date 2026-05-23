@@ -3,13 +3,20 @@
  * tries each tier in order until one succeeds.
  *
  * Default policy (free first, paid as last-resort):
- *   - plain text chat        →  [workers-ai, gemini]  (small model fine; save Gemini quota)
- *   - has tools[]            →  [workers-ai, gemini]  (Gemma 4 26B A4B has native structured
- *                                                      tool use; Gemini is the fallback when
- *                                                      Workers AI quota trips)
- *   - image content present  →  [gemini]              (image translation not yet implemented
- *                                                      for Workers AI path)
- *   - very long context      →  [gemini, workers-ai]  (Gemini's window is bigger)
+ *   - plain text chat        →  [groq, workers-ai, gemini, openrouter]
+ *                                                     (four independent free-quota pools
+ *                                                      — exhausting all on the same day
+ *                                                      is what makes the paid fallback rare)
+ *   - has tools[]            →  [groq, workers-ai, gemini, openrouter]
+ *                                                     (groq llama-3.3-70b has the best free
+ *                                                      tool-use; gemma-4 / gemini / openrouter
+ *                                                      are independent fallbacks)
+ *   - image content present  →  [gemini, openrouter]  (gemini is the best free vision; OpenRouter
+ *                                                      has free Llama 4 vision as a safety net)
+ *   - very long context      →  [gemini, openrouter, workers-ai]
+ *                                                     (gemini 2.5 flash has 1M+ context;
+ *                                                      OpenRouter's free Llama 4 has 256k+;
+ *                                                      workers-ai's gemma-4 caps lower)
  *   - has output_config      →  [anthropic]           (json_schema structured output is an
  *                                                      Anthropic-native SDK feature — free
  *                                                      backends don't understand the field
@@ -25,11 +32,13 @@
  *
  * Explicit per-request overrides via `metadata.fortune_route`:
  *   - "anthropic"   →  [anthropic]                    (force paid)
- *   - "free"        →  [workers-ai, gemini] (or rule-derived equivalent)
- *                                                    (free-only, no paid fallback,
- *                                                     even if anthropic is configured)
+ *   - "free"        →  rule-derived free chain        (no paid fallback even if anthropic
+ *                                                      is configured — for background jobs
+ *                                                      that should fail gracefully)
  *   - "workers-ai"  →  [workers-ai]
  *   - "gemini"      →  [gemini]
+ *   - "groq"        →  [groq]
+ *   - "openrouter"  →  [openrouter]
  *
  * When the chain is exhausted (every tier failed or rate-limited) the
  * gateway fails loudly with a 503. Auto-fallback to Anthropic only kicks
@@ -39,7 +48,7 @@
 
 import type { AnthropicMessagesRequest, AnthropicContentBlock } from "./types.js";
 
-export type BackendKind = "workers-ai" | "gemini" | "anthropic";
+export type BackendKind = "workers-ai" | "gemini" | "groq" | "openrouter" | "anthropic";
 
 export interface RouteChain {
   tiers: BackendKind[];
@@ -73,6 +82,12 @@ export function decideRoute(
   }
   if (meta?.fortune_route === "gemini") {
     return { tiers: ["gemini"], reason: "explicit metadata.fortune_route=gemini" };
+  }
+  if (meta?.fortune_route === "groq") {
+    return { tiers: ["groq"], reason: "explicit metadata.fortune_route=groq" };
+  }
+  if (meta?.fortune_route === "openrouter") {
+    return { tiers: ["openrouter"], reason: "explicit metadata.fortune_route=openrouter" };
   }
   // "free" forces the default free chain even when anthropicFallback is on.
   // Lets a caller opt out of paid escalation per-request (e.g. background
@@ -119,35 +134,45 @@ function hasOutputConfig(req: AnthropicMessagesRequest): boolean {
  * The free-only chain for a given request shape. Pure: no env, no options.
  * Use this both as the default chain and as the result for the `free`
  * metadata override.
+ *
+ * Chain ordering principle: stack as many *independent* free-quota pools
+ * as possible. Each provider has its own daily/RPM quota, so a chain of
+ * N providers gives roughly N× the per-day request ceiling vs. any one
+ * of them alone. The point of the gateway: when one quota dries up,
+ * silently slide to the next pool.
  */
 function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
-  if (containsImage(req)) return ["gemini"];
-
-  const approxTokens = estimateInputTokens(req);
-  if (approxTokens > LONG_CONTEXT_THRESHOLD) return ["gemini", "workers-ai"];
-
-  // Tools[] present → Claude-Code-style agent traffic. Gemma 4 26B A4B
-  // has native structured tool use; use it first. Gemini is the fallback
-  // when Workers AI quota trips (the circuit breaker handles it).
-  if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return ["workers-ai", "gemini"];
+  if (containsImage(req)) {
+    // Gemini is the strongest free vision model; OpenRouter's free Llama 4
+    // is the backup. Workers AI Gemma 4 supports vision but image-block
+    // translation isn't implemented in workers-ai.ts yet.
+    return ["gemini", "openrouter"];
   }
 
-  return ["workers-ai", "gemini"];
+  const approxTokens = estimateInputTokens(req);
+  if (approxTokens > LONG_CONTEXT_THRESHOLD) {
+    // gemini-2.5-flash: 1M+ context. OpenRouter free Llama 4: 256k+.
+    // Workers AI Gemma 4: 128k. Groq llama-3.3 caps at 128k (skipped here).
+    return ["gemini", "openrouter", "workers-ai"];
+  }
+
+  // Default for both plain chat and tool-using calls: groq first (fastest,
+  // native tool use, big free quota), then workers-ai (separate Cloudflare
+  // quota), gemini (separate Google quota), openrouter (yet another pool).
+  // Four independent quotas = "rarely hits anthropic" in practice.
+  return ["groq", "workers-ai", "gemini", "openrouter"];
 }
 
 function freeChainReason(req: AnthropicMessagesRequest, chain: BackendKind[]): string {
-  if (containsImage(req)) return "image content block present";
+  if (containsImage(req)) return "image content block present; gemini-led vision chain";
   const approxTokens = estimateInputTokens(req);
   if (approxTokens > LONG_CONTEXT_THRESHOLD) {
-    return `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}`;
+    return `approx ${approxTokens} input tokens > ${LONG_CONTEXT_THRESHOLD}; long-context chain`;
   }
   if (Array.isArray(req.tools) && req.tools.length > 0) {
-    return `tools=${req.tools.length}; workers-ai (Gemma 4) handles tool use natively`;
+    return `tools=${req.tools.length}; multi-provider free chain (${chain.join(",")})`;
   }
-  return chain[0] === "workers-ai"
-    ? "plain text chat; workers-ai default"
-    : `default free chain ${chain.join(", ")}`;
+  return `plain text chat; default free chain ${chain.join(",")}`;
 }
 
 function containsImage(req: AnthropicMessagesRequest): boolean {

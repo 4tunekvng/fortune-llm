@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   buildGeminiInput,
   translateToolsToGemini,
@@ -6,7 +6,10 @@ import {
   geminiToAnthropicMessage,
   requestHasImage,
   streamGeminiAsAnthropic,
+  resolveGeminiKeys,
+  callGeminiWithRotation,
 } from "../src/gemini.js";
+import { isQuotaError } from "../src/circuit-breaker.js";
 import type { AnthropicMessagesRequest, GeminiResponse } from "../src/types.js";
 
 const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMessagesRequest => ({
@@ -525,5 +528,103 @@ describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", (
       | { delta?: { stop_reason?: string } }
       | undefined;
     expect(delta?.delta?.stop_reason).toBe("tool_use");
+  });
+});
+
+describe("resolveGeminiKeys", () => {
+  it("returns the singular key when only it is set", () => {
+    expect(resolveGeminiKeys(undefined, "single-key")).toEqual(["single-key"]);
+  });
+
+  it("splits comma-separated plural", () => {
+    expect(resolveGeminiKeys("a,b,c", undefined)).toEqual(["a", "b", "c"]);
+  });
+
+  it("trims whitespace and skips empties", () => {
+    expect(resolveGeminiKeys(" a , , b ,c", undefined)).toEqual(["a", "b", "c"]);
+  });
+
+  it("merges singular + plural without duplicating shared keys", () => {
+    expect(resolveGeminiKeys("a,b", "b")).toEqual(["a", "b"]);
+  });
+
+  it("returns an empty array when neither is set", () => {
+    expect(resolveGeminiKeys(undefined, undefined)).toEqual([]);
+  });
+
+  it("ignores empty strings", () => {
+    expect(resolveGeminiKeys("", "")).toEqual([]);
+  });
+});
+
+describe("callGeminiWithRotation", () => {
+  // Use `any` here because vi.spyOn over the CF-typed global fetch
+  // produces an intersection type the strict TS config can't narrow.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fetchSpy: any;
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  const okResponse = () =>
+    new Response(
+      JSON.stringify({
+        candidates: [
+          { content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" },
+        ],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  it("throws synchronously when given zero keys", async () => {
+    await expect(
+      callGeminiWithRotation([], "gemini-2.5-flash", baseReq(), isQuotaError),
+    ).rejects.toThrow(/not configured/);
+  });
+
+  it("returns on the first key that succeeds", async () => {
+    fetchSpy.mockResolvedValueOnce(okResponse());
+    const resp = await callGeminiWithRotation(["k1"], "gemini-2.5-flash", baseReq(), isQuotaError);
+    expect(resp.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls through quota errors to the next key", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response("RESOURCE_EXHAUSTED: quota exceeded for free tier", { status: 429 }),
+    );
+    fetchSpy.mockResolvedValueOnce(okResponse());
+    const resp = await callGeminiWithRotation(
+      ["k1", "k2"],
+      "gemini-2.5-flash",
+      baseReq(),
+      isQuotaError,
+    );
+    expect(resp.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws on the first non-quota error without trying remaining keys", async () => {
+    // 400 with no quota signal — likely a request-shape problem that
+    // every key would hit equally. No point burning the rest.
+    fetchSpy.mockResolvedValueOnce(new Response("bad request", { status: 400 }));
+    await expect(
+      callGeminiWithRotation(["k1", "k2", "k3"], "gemini-2.5-flash", baseReq(), isQuotaError),
+    ).rejects.toThrow(/Gemini 400/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows the last quota error when every key is exhausted", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response("RESOURCE_EXHAUSTED: rate limit", { status: 429 }),
+    );
+    await expect(
+      callGeminiWithRotation(["k1", "k2"], "gemini-2.5-flash", baseReq(), isQuotaError),
+    ).rejects.toThrow(/RESOURCE_EXHAUSTED|429/);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });

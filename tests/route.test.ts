@@ -9,21 +9,28 @@ const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMe
   ...overrides,
 });
 
+// The default free chain stacks every independent free-quota pool. Centralized
+// here so future additions (Cerebras, GitHub Models, …) update one place.
+const DEFAULT_FREE_CHAIN = ["groq", "workers-ai", "gemini", "openrouter"] as const;
+const LONG_CONTEXT_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
+const VISION_FREE_CHAIN = ["gemini", "openrouter"] as const;
+
 describe("decideRoute", () => {
-  it("defaults to the free chain [workers-ai, gemini] for plain text chat", () => {
+  it("defaults to the multi-provider free chain for plain text chat", () => {
     const d = decideRoute(baseReq());
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes tools[]-bearing requests workers-ai-first (Gemma 4 26B A4B has native tool calling)", () => {
+  it("routes tools[]-bearing requests through the same multi-provider chain (groq first)", () => {
     const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
+    expect(d.tiers[0]).toBe("groq");
     expect(d.tiers).not.toContain("anthropic");
     expect(d.reason).toMatch(/tools=1/);
   });
 
-  it("routes vision-bearing requests to gemini only (workers-ai has no vision)", () => {
+  it("routes vision-bearing requests to gemini→openrouter (workers-ai has no vision adapter)", () => {
     const d = decideRoute(
       baseReq({
         messages: [
@@ -37,15 +44,14 @@ describe("decideRoute", () => {
         ],
       }),
     );
-    expect(d.tiers).toEqual(["gemini"]);
+    expect(d.tiers).toEqual([...VISION_FREE_CHAIN]);
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("prefers gemini for very long context but keeps workers-ai as fallback", () => {
+  it("prefers gemini for very long context, openrouter Llama 4 next, workers-ai last", () => {
     const huge = "x".repeat(420_000); // ~105k tokens > 100k threshold
     const d = decideRoute(baseReq({ messages: [{ role: "user", content: huge }] }));
-    expect(d.tiers[0]).toBe("gemini");
-    expect(d.tiers).toContain("workers-ai");
+    expect(d.tiers).toEqual([...LONG_CONTEXT_FREE_CHAIN]);
     expect(d.tiers).not.toContain("anthropic");
   });
 
@@ -70,16 +76,26 @@ describe("decideRoute", () => {
     expect(d.tiers).toEqual(["gemini"]);
   });
 
+  it("honors metadata.fortune_route=groq", () => {
+    const d = decideRoute(baseReq({ metadata: { fortune_route: "groq" } }));
+    expect(d.tiers).toEqual(["groq"]);
+  });
+
+  it("honors metadata.fortune_route=openrouter", () => {
+    const d = decideRoute(baseReq({ metadata: { fortune_route: "openrouter" } }));
+    expect(d.tiers).toEqual(["openrouter"]);
+  });
+
   it("empty tools array does not change routing", () => {
     const d = decideRoute(baseReq({ tools: [] }));
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
   });
 });
 
 describe("decideRoute — anthropic auto-fallback", () => {
   it("appends anthropic to a plain-text default chain when configured", () => {
     const d = decideRoute(baseReq(), { anthropicFallback: true });
-    expect(d.tiers).toEqual(["workers-ai", "gemini", "anthropic"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN, "anthropic"]);
     expect(d.reason).toMatch(/anthropic appended as last-resort/);
   });
 
@@ -88,7 +104,7 @@ describe("decideRoute — anthropic auto-fallback", () => {
       baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }),
       { anthropicFallback: true },
     );
-    expect(d.tiers).toEqual(["workers-ai", "gemini", "anthropic"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN, "anthropic"]);
   });
 
   it("appends anthropic to a vision-only default chain", () => {
@@ -106,7 +122,7 @@ describe("decideRoute — anthropic auto-fallback", () => {
       }),
       { anthropicFallback: true },
     );
-    expect(d.tiers).toEqual(["gemini", "anthropic"]);
+    expect(d.tiers).toEqual([...VISION_FREE_CHAIN, "anthropic"]);
   });
 
   it("does NOT append anthropic when an explicit override pins to a free tier", () => {
@@ -122,7 +138,7 @@ describe("decideRoute — anthropic auto-fallback", () => {
       baseReq({ metadata: { fortune_route: "free" } }),
       { anthropicFallback: true },
     );
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
     expect(d.tiers).not.toContain("anthropic");
     expect(d.reason).toContain("no paid fallback");
   });
@@ -165,7 +181,7 @@ describe("decideRoute — anthropic auto-fallback", () => {
       },
     } as unknown as AnthropicMessagesRequest;
     const d = decideRoute(req, { anthropicFallback: false });
-    expect(d.tiers).toEqual(["workers-ai", "gemini"]);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
   });
 });
 

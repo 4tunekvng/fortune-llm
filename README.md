@@ -6,20 +6,25 @@ last-resort tier appended automatically when the worker has an
 `ANTHROPIC_API_KEY` configured.
 
 ```
-                ┌─────────────────────────────────────────────────────────────┐
-POST /v1/messages   decideRoute(body, { anthropicFallback })                   │
-                ├─────────────────────────────────────────────────────────────┤
-                │ default                  →  [workers-ai, gemini, *anthropic] │
-                │ image content present    →  [gemini, *anthropic]             │
-                │ very long context        →  [gemini, workers-ai, *anthropic] │
-                │ tools[] present          →  [gemini, workers-ai, *anthropic] │
-                │                                                              │
-                │ metadata.fortune_route="anthropic"  →  [anthropic]           │
-                │ metadata.fortune_route="free"       →  free chain only       │
-                │ metadata.fortune_route="workers-ai" →  [workers-ai]          │
-                │ metadata.fortune_route="gemini"     →  [gemini]              │
-                └─────────────────────────────────────────────────────────────┘
-                  * anthropic appended ONLY when ANTHROPIC_API_KEY is configured
+                ┌──────────────────────────────────────────────────────────────────────────┐
+POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
+                ├──────────────────────────────────────────────────────────────────────────┤
+                │ default / tools[]     →  [groq, workers-ai, gemini, openrouter,*anthropic]│
+                │ image content         →  [gemini, openrouter, *anthropic]                 │
+                │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
+                │ output_config (JSON)  →  [anthropic]   (free tiers can't speak it)        │
+                │                                                                            │
+                │ metadata.fortune_route="anthropic"  →  [anthropic]   (force paid)         │
+                │ metadata.fortune_route="free"       →  free chain only (no paid fallback) │
+                │ metadata.fortune_route="groq"       →  [groq]                              │
+                │ metadata.fortune_route="workers-ai" →  [workers-ai]                        │
+                │ metadata.fortune_route="gemini"     →  [gemini]                            │
+                │ metadata.fortune_route="openrouter" →  [openrouter]                        │
+                └──────────────────────────────────────────────────────────────────────────┘
+                  * anthropic appended ONLY when ANTHROPIC_API_KEY is configured.
+                  The free chain stacks 4 independent quota pools, so with all
+                  four configured + Gemini key rotation, anthropic is reached
+                  only after every pool is exhausted — rare in practice.
                                    │
                                    ▼
                         Try each tier in order. First one
@@ -56,20 +61,30 @@ ANTHROPIC_API_KEY=<gateway-token>            # not an Anthropic key
 
 ## Backends
 
-| Tier | Model | Cost | Capabilities | Auto-fallback? |
-|------|-------|------|--------------|----------------|
-| `workers-ai` | `@cf/meta/llama-4-scout-17b-16e-instruct` (configurable) | Free up to 10k neurons/day | Text, tool use, long-ish context | yes |
-| `gemini` | `gemini-2.5-flash` (configurable) | Free up to API rate caps | Text, tool use, vision, long context | yes |
-| `anthropic` | Whatever the caller asked for | Paid | Frontier | Last-resort. Appended automatically when `ANTHROPIC_API_KEY` is configured; can also be forced via `metadata.fortune_route="anthropic"`. |
+| Tier | Default model | Cost | Capabilities | Notes |
+|------|---------------|------|--------------|-------|
+| `groq` | `llama-3.3-70b-versatile` | Free, generous RPM/RPD | Text, native tool use, fastest inference | Goes first in the default chain. Configurable via `DEFAULT_GROQ_MODEL`. |
+| `workers-ai` | `@cf/google/gemma-4-26b-a4b-it` | Free up to 10k neurons/day (per Cloudflare account) | Text, tool use | Separate quota from every other tier. Configurable via `DEFAULT_OSS_MODEL`. |
+| `gemini` | `gemini-2.5-flash` | Free up to RPM/RPD caps (per API key) | Text, tool use, vision, 1M+ context | Supports multi-key rotation: set `GEMINI_API_KEYS` (comma-separated) to multiply quota. Configurable via `DEFAULT_GEMINI_MODEL`. |
+| `openrouter` | `meta-llama/llama-3.3-70b-instruct:free` | Free via `:free` model variants | Text, tool use, vision (some models), long context | Independent quota pool that doesn't share with Cloudflare/Google/Groq. Configurable via `DEFAULT_OPENROUTER_MODEL`. |
+| `anthropic` | Whatever the caller asked for | Paid | Frontier | Last-resort: appended automatically when `ANTHROPIC_API_KEY` is configured; can also be forced via `metadata.fortune_route="anthropic"`. |
+
+The whole point of stacking four free tiers is that each one has an
+independent quota pool — exhausting all of them on the same day is rare,
+which means `anthropic` (the only one that bills) is rarely reached even
+under significant load. Add a few more Gemini keys (friend-donated) and
+the chain comfortably handles thousands of requests/day on free.
 
 Diagnostic headers on every response:
 
 ```
-x-fortune-llm-route:          workers-ai | gemini | anthropic
-x-fortune-llm-model:           the actual model executed
-x-fortune-llm-chain:           workers-ai,gemini
-x-fortune-llm-reason:          why this chain was picked
-x-fortune-llm-prior-errors:    tier:msg | tier:msg   (only when a tier failed before success)
+x-fortune-llm-route:          groq | workers-ai | gemini | openrouter | anthropic
+x-fortune-llm-model:          the actual model executed
+x-fortune-llm-chain:          groq,workers-ai,gemini,openrouter
+x-fortune-llm-reason:         why this chain was picked
+x-fortune-llm-prior-errors:   tier:msg | tier:msg   (only when a tier failed before success)
+x-fortune-llm-gemini-keys:    N                       (only when N > 1 keys are configured)
+x-fortune-llm-skipped:        tier:<ISO>,…            (tiers whose circuit was open)
 ```
 
 ## Endpoints
@@ -89,10 +104,17 @@ Cloudflare account with Workers (free) and Workers AI (free tier covers
 ```
 npm install
 npm test
-npm run login                       # opens browser; one-time wrangler login
-npm run secret:set:token            # any random string; consumers send this as their API key
-npm run secret:set:gemini           # paste your free Gemini API key from AI Studio
-npm run secret:set:anthropic        # OPTIONAL — only if you want the paid escape valve enabled
+npm run login                              # opens browser; one-time wrangler login
+npm run secret:set:token                   # any random string; consumers send this as their API key
+
+# Free providers — set as many as you can; each is an independent quota pool.
+npm run secret:set:groq                    # https://console.groq.com/keys
+npm run secret:set:openrouter              # https://openrouter.ai/keys
+npm run secret:set:gemini                  # one Gemini key (https://aistudio.google.com/apikey), OR:
+npm run secret:set:gemini:multi            # comma-separated multiple Gemini keys → N× quota
+
+npm run secret:set:anthropic               # OPTIONAL — paid last-resort. Omit for strict free-only.
+
 npx wrangler kv namespace create CIRCUIT             # one-time: circuit-breaker state
 npx wrangler kv namespace create CIRCUIT --preview   # one-time: preview env
 # copy the printed ids into wrangler.toml (replace REPLACE_WITH_KV_NAMESPACE_ID etc.)
