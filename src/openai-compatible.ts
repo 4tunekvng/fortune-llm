@@ -179,6 +179,8 @@ export function openAIToAnthropicMessage(
     content.push({ type: "text", text });
   }
   for (const tc of toolCalls) {
+    // Guard against malformed upstream responses where `function` is absent.
+    if (!tc.function) continue;
     content.push({
       type: "tool_use",
       id: tc.id,
@@ -190,8 +192,9 @@ export function openAIToAnthropicMessage(
     content.push({ type: "text", text: "" });
   }
 
+  const validToolCalls = toolCalls.filter((tc) => tc.function);
   let stopReason: AnthropicStopReason = "end_turn";
-  if (toolCalls.length > 0) {
+  if (validToolCalls.length > 0) {
     stopReason = "tool_use";
   } else if (choice?.finish_reason === "length") {
     stopReason = "max_tokens";

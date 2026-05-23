@@ -291,6 +291,8 @@ export function workersAiToAnthropicMessage(
     content.push({ type: "text", text });
   }
   for (const tc of toolCalls) {
+    // Guard against malformed upstream responses where `function` is absent.
+    if (!tc.function) continue;
     content.push({
       type: "tool_use",
       id: tc.id,
@@ -303,13 +305,14 @@ export function workersAiToAnthropicMessage(
     content.push({ type: "text", text: "" });
   }
 
-  const stopReason: AnthropicStopReason = toolCalls.length > 0 ? "tool_use" : "end_turn";
+  const validToolCalls = toolCalls.filter((tc) => tc.function);
+  const stopReason: AnthropicStopReason = validToolCalls.length > 0 ? "tool_use" : "end_turn";
   const promptTokens = result.usage?.prompt_tokens ?? estimatePromptTokens(input);
   const completionTokens =
     result.usage?.completion_tokens ??
     Math.ceil(
       (text.length +
-        toolCalls.reduce((acc, tc) => acc + tc.function.name.length + tc.function.arguments.length, 0)) /
+        validToolCalls.reduce((acc, tc) => acc + tc.function.name.length + tc.function.arguments.length, 0)) /
         4,
     );
 
@@ -403,7 +406,8 @@ export function synthesizeToolStream(
         blockIndex += 1;
       }
 
-      for (const tc of toolCalls) {
+      const validToolCalls = toolCalls.filter((tc) => tc.function);
+      for (const tc of validToolCalls) {
         writeEvent("content_block_start", {
           type: "content_block_start",
           index: blockIndex,
@@ -426,7 +430,7 @@ export function synthesizeToolStream(
       writeEvent("message_delta", {
         type: "message_delta",
         delta: {
-          stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn",
+          stop_reason: validToolCalls.length > 0 ? "tool_use" : "end_turn",
           stop_sequence: null,
         },
         usage: {
