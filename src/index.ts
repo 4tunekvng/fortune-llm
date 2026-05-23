@@ -80,7 +80,7 @@ export default {
             anthropic: Boolean(env.ANTHROPIC_API_KEY),
           },
         }),
-        { headers: { "content-type": "application/json" } },
+        { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
       );
     }
 
