@@ -101,6 +101,10 @@ export default {
 
     let rawBody = "";
     if (request.method !== "GET" && request.method !== "HEAD") {
+      const contentLength = parseInt(request.headers.get("content-length") ?? "0", 10);
+      if (contentLength > 1_048_576) {
+        return jsonError(413, "request_too_large", "Request body exceeds 1 MB limit");
+      }
       rawBody = await request.text();
     }
 
