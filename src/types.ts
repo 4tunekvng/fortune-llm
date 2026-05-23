@@ -146,6 +146,7 @@ export interface GeminiGenerateRequest {
     topK?: number;
     maxOutputTokens?: number;
     stopSequences?: string[];
+    thinkingConfig?: { thinkingBudget?: number; includeThoughts?: boolean };
   };
 }
 

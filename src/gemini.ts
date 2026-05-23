@@ -66,6 +66,13 @@ export function buildGeminiInput(req: AnthropicMessagesRequest): GeminiGenerateR
     contents,
     generationConfig: {
       maxOutputTokens: clampMaxTokens(req.max_tokens),
+      // Gemini 2.5's dynamic "thinking" eats from maxOutputTokens. A 200-token
+      // max_tokens budget with thinking on can produce only 4-6 visible output
+      // tokens (we observed network-agent drafts truncating to "Hey Hannah, it's"
+      // with stop_reason=max_tokens). Anthropic-style requests have no thinking
+      // field; consumers expect the full max_tokens budget for the response.
+      // Disable thinking so the gateway is a faithful proxy of max_tokens.
+      thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
       ...(typeof req.temperature === "number" ? { temperature: req.temperature } : {}),
       ...(typeof req.top_p === "number" ? { topP: req.top_p } : {}),
       ...(typeof req.top_k === "number" ? { topK: req.top_k } : {}),
