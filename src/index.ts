@@ -74,7 +74,9 @@ export default {
           backends: {
             "workers-ai": true, // bound by the AI binding, always available
             gemini: geminiKeys.length > 0,
-            gemini_key_count: geminiKeys.length,
+            // Omit gemini_key_count — the exact number of configured API keys
+            // is operational detail that needn't be visible to unauthenticated
+            // callers scanning the public /healthz probe.
             groq: Boolean(env.GROQ_API_KEY),
             openrouter: Boolean(env.OPENROUTER_API_KEY),
             anthropic: Boolean(env.ANTHROPIC_API_KEY),
