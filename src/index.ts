@@ -101,11 +101,18 @@ export default {
 
     let rawBody = "";
     if (request.method !== "GET" && request.method !== "HEAD") {
-      const contentLength = parseInt(request.headers.get("content-length") ?? "0", 10);
-      if (contentLength > 1_048_576) {
+      const clRaw = request.headers.get("content-length");
+      const contentLength = clRaw !== null ? parseInt(clRaw, 10) : NaN;
+      // Fast-reject on a declared oversized body before reading it.
+      if (Number.isFinite(contentLength) && contentLength > 1_048_576) {
         return jsonError(413, "request_too_large", "Request body exceeds 1 MB limit");
       }
       rawBody = await request.text();
+      // Enforce the limit on the actual body size when Content-Length was absent
+      // or non-numeric — a missing header must not be a bypass vector.
+      if (rawBody.length > 1_048_576) {
+        return jsonError(413, "request_too_large", "Request body exceeds 1 MB limit");
+      }
     }
 
     // Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
