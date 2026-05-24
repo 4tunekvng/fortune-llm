@@ -110,7 +110,9 @@ export default {
       rawBody = await request.text();
       // Enforce the limit on the actual body size when Content-Length was absent
       // or non-numeric — a missing header must not be a bypass vector.
-      if (rawBody.length > 1_048_576) {
+      // Use byteLength (not .length) so multi-byte UTF-8 characters don't
+      // allow payloads larger than 1 MiB to slip through the character-count check.
+      if (new TextEncoder().encode(rawBody).byteLength > 1_048_576) {
         return jsonError(413, "request_too_large", "Request body exceeds 1 MB limit");
       }
     }
@@ -203,6 +205,7 @@ export default {
           headers.set("x-fortune-llm-skipped", formatSkippedHeader(skipped));
         }
         headers.set("access-control-allow-origin", "*");
+        headers.set("access-control-expose-headers", EXPOSE_HEADERS);
         return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
       } catch (err) {
         const msg = errorMessage(err);
@@ -229,6 +232,7 @@ export default {
     const headers: HeadersInit = {
       "content-type": "application/json",
       "access-control-allow-origin": "*",
+      "access-control-expose-headers": EXPOSE_HEADERS,
     };
     if (skipped.length > 0) {
       (headers as Record<string, string>)["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
@@ -341,16 +345,27 @@ async function invokeTier(
   return forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
 }
 
+// Diagnostic response headers exposed to cross-origin clients.
+const EXPOSE_HEADERS =
+  "x-fortune-llm-route, x-fortune-llm-chain, x-fortune-llm-reason, " +
+  "x-fortune-llm-prior-errors, x-fortune-llm-skipped, x-fortune-llm-model, " +
+  "x-fortune-llm-gemini-keys";
+
 function jsonError(status: number, type: string, message: string): Response {
   return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
     status,
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+    headers: {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": EXPOSE_HEADERS,
+    },
   });
 }
 
 function withCors(resp: Response): Response {
   const headers = new Headers(resp.headers);
   headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-expose-headers", EXPOSE_HEADERS);
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
 }
 
@@ -364,5 +379,7 @@ function corsHeaders(): HeadersInit {
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "x-api-key, anthropic-version, anthropic-beta, content-type, authorization",
     "access-control-max-age": "86400",
+    // Expose the diagnostic headers so cross-origin clients can read them.
+    "access-control-expose-headers": EXPOSE_HEADERS,
   };
 }
