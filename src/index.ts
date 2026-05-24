@@ -210,9 +210,12 @@ export default {
         // Trip the circuit on quota / rate-limit signals so subsequent
         // requests skip this tier outright instead of repeatedly
         // burning a fetch on a guaranteed failure.
+        // Note: do NOT push to `skipped` here — this tier was actually tried
+        // (it belongs in `errors`). `skipped` is reserved for tiers whose
+        // circuit was already open at the top of this request loop, so the
+        // final error message doesn't double-report the same tier.
         if (tier !== "anthropic" && isQuotaError(err)) {
           await tripCircuit(tier, env.CIRCUIT, tripDurationMs, msg);
-          skipped.push({ tier, until: Date.now() + tripDurationMs });
         }
         // continue to next tier
       }

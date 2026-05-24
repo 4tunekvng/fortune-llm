@@ -106,9 +106,18 @@ export async function callOpenAICompatible(
   const body = buildWorkersAiInput(req);
   // The body needs the model name — Workers AI takes that as a separate
   // arg to the binding, but HTTP endpoints expect it inline.
-  const httpBody = { ...body, model: config.model };
 
-  const wantsStream = Boolean(body.stream);
+  // fortune_require_tools=true requires buffered (non-streaming) response so
+  // we can inspect stop_reason before committing to a response. Force stream=false
+  // in that case — mirrors the workers-ai path which already does this for all
+  // tool-bearing calls.
+  const requireTools =
+    Array.isArray(req.tools) &&
+    req.tools.length > 0 &&
+    (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+  const wantsStream = Boolean(body.stream) && !requireTools;
+
+  const httpBody = { ...body, model: config.model, stream: wantsStream };
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -144,10 +153,7 @@ export async function callOpenAICompatible(
   // and gemini use: callers that require a tool call set
   // metadata.fortune_require_tools=true; a text-only response then
   // throws so the dispatcher falls through to the next tier.
-  const requireTools =
-    Array.isArray(req.tools) &&
-    req.tools.length > 0 &&
-    (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+  // `requireTools` is already computed above (and used to suppress streaming).
   if (requireTools && anthropicShape.stop_reason !== "tool_use") {
     throw new Error(
       `${config.label} returned no tool calls though tools were declared and fortune_require_tools=true. ` +

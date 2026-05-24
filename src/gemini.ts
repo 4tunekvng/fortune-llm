@@ -399,7 +399,15 @@ export async function callGemini(
   req: AnthropicMessagesRequest,
 ): Promise<Response> {
   const body = buildGeminiInput(req);
-  const wantsStream = Boolean(req.stream);
+  // fortune_require_tools=true requires buffered (non-streaming) response so
+  // we can inspect stop_reason before committing to a response. Force stream=false
+  // in that case — mirrors the workers-ai path which already does this for all
+  // tool-bearing calls.
+  const requireTools =
+    Array.isArray(req.tools) &&
+    req.tools.length > 0 &&
+    (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+  const wantsStream = Boolean(req.stream) && !requireTools;
   const action = wantsStream ? "streamGenerateContent" : "generateContent";
   const url = `${GEMINI_API_BASE}/models/${encodeURIComponent(opts.model)}:${action}${
     wantsStream ? "?alt=sse&" : "?"
@@ -431,10 +439,7 @@ export async function callGemini(
   // as a backend weakness — throw so the dispatcher falls through to the
   // next tier (anthropic). Default behaviour is unchanged: silence is OK
   // when the consumer didn't opt in.
-  const requireTools =
-    Array.isArray(req.tools) &&
-    req.tools.length > 0 &&
-    (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
+  // `requireTools` is already computed above (and used to suppress streaming).
   if (requireTools && anthropicShape.stop_reason !== "tool_use") {
     throw new Error(
       "Gemini returned no tool calls though tools were declared and fortune_require_tools=true. " +
