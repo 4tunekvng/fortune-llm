@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   checkRateLimit,
   getClientIp,
+  getRateLimitScope,
+  resolveConsumerRateLimit,
   resolveRateLimitPerMin,
   DEFAULT_RATE_LIMIT_PER_MIN,
 } from "../src/rate-limit.js";
@@ -88,6 +90,61 @@ describe("checkRateLimit", () => {
     expect(blocked.allowed).toBe(false);
     const otherIp = await checkRateLimit("9.9.9.9", 3, kv);
     expect(otherIp.allowed).toBe(true);
+  });
+});
+
+describe("getRateLimitScope", () => {
+  it("returns consumer scope when valid x-fortune-consumer header present", () => {
+    const req = new Request("https://x", { headers: { "x-fortune-consumer": "lena" } });
+    expect(getRateLimitScope(req)).toEqual({ scope: "lena", kind: "consumer" });
+  });
+
+  it("lowercases consumer names for consistency", () => {
+    const req = new Request("https://x", { headers: { "x-fortune-consumer": "LENA" } });
+    expect(getRateLimitScope(req)).toEqual({ scope: "lena", kind: "consumer" });
+  });
+
+  it("falls back to IP scope when the header is missing", () => {
+    const req = new Request("https://x", { headers: { "cf-connecting-ip": "1.2.3.4" } });
+    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+  });
+
+  it("falls back to IP scope when the consumer header has invalid characters", () => {
+    const req = new Request("https://x", {
+      headers: { "x-fortune-consumer": "bad name with spaces!", "cf-connecting-ip": "1.2.3.4" },
+    });
+    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+  });
+
+  it("falls back to IP scope when the consumer header is too long", () => {
+    const req = new Request("https://x", {
+      headers: { "x-fortune-consumer": "x".repeat(33), "cf-connecting-ip": "1.2.3.4" },
+    });
+    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+  });
+});
+
+describe("resolveConsumerRateLimit", () => {
+  it("returns the global default when no override exists", () => {
+    expect(resolveConsumerRateLimit("knox", 200, {})).toBe(200);
+  });
+
+  it("honors RATE_LIMIT_PER_MIN_<CONSUMER> overrides", () => {
+    expect(
+      resolveConsumerRateLimit("lena", 200, { RATE_LIMIT_PER_MIN_LENA: "500" }),
+    ).toBe(500);
+  });
+
+  it("normalizes consumer names with dashes to underscores for env lookup", () => {
+    expect(
+      resolveConsumerRateLimit("network-agent", 200, { RATE_LIMIT_PER_MIN_NETWORK_AGENT: "1000" }),
+    ).toBe(1000);
+  });
+
+  it("rejects malformed consumer names (returns default)", () => {
+    expect(
+      resolveConsumerRateLimit("bad name", 200, { "RATE_LIMIT_PER_MIN_BAD NAME": "500" }),
+    ).toBe(200);
   });
 });
 

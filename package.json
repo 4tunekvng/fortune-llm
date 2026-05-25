@@ -13,6 +13,8 @@
     "secret:set:gemini:multi": "wrangler secret put GEMINI_API_KEYS",
     "secret:set:groq": "wrangler secret put GROQ_API_KEY",
     "secret:set:cerebras": "wrangler secret put CEREBRAS_API_KEY",
+    "secret:set:github-models": "wrangler secret put GITHUB_MODELS_API_KEY",
+    "secret:set:mistral": "wrangler secret put MISTRAL_API_KEY",
     "secret:set:openrouter": "wrangler secret put OPENROUTER_API_KEY",
     "secret:set:anthropic": "wrangler secret put ANTHROPIC_API_KEY",
     "tail": "wrangler tail",

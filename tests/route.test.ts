@@ -11,7 +11,15 @@ const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMe
 
 // The default free chain stacks every independent free-quota pool. Centralized
 // here so future additions update one place.
-const DEFAULT_FREE_CHAIN = ["groq", "cerebras", "workers-ai", "gemini", "openrouter"] as const;
+const DEFAULT_FREE_CHAIN = [
+  "groq",
+  "cerebras",
+  "mistral",
+  "workers-ai",
+  "gemini",
+  "github-models",
+  "openrouter",
+] as const;
 const LONG_CONTEXT_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
 const VISION_FREE_CHAIN = ["gemini", "openrouter"] as const;
 
@@ -89,6 +97,16 @@ describe("decideRoute", () => {
   it("honors metadata.fortune_route=cerebras", () => {
     const d = decideRoute(baseReq({ metadata: { fortune_route: "cerebras" } }));
     expect(d.tiers).toEqual(["cerebras"]);
+  });
+
+  it("honors metadata.fortune_route=github-models", () => {
+    const d = decideRoute(baseReq({ metadata: { fortune_route: "github-models" } }));
+    expect(d.tiers).toEqual(["github-models"]);
+  });
+
+  it("honors metadata.fortune_route=mistral", () => {
+    const d = decideRoute(baseReq({ metadata: { fortune_route: "mistral" } }));
+    expect(d.tiers).toEqual(["mistral"]);
   });
 
   it("empty tools array does not change routing", () => {

@@ -24,6 +24,8 @@ import {
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
 import { callCerebras, DEFAULT_CEREBRAS_MODEL } from "./cerebras.js";
+import { callGitHubModels, DEFAULT_GITHUB_MODELS_MODEL } from "./github-models.js";
+import { callMistral, DEFAULT_MISTRAL_MODEL } from "./mistral.js";
 import {
   callOpenRouter,
   DEFAULT_OPENROUTER_MODELS,
@@ -44,12 +46,14 @@ import {
   writeCache,
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
+import { resolveProviderKey, type ByokProvider } from "./byok.js";
 import type { StatsEvent } from "./stats-do.js";
 // Re-export the DO class so the Workers runtime can find it.
 export { StatsDO } from "./stats-do.js";
 import {
   checkRateLimit,
-  getClientIp,
+  getRateLimitScope,
+  resolveConsumerRateLimit,
   resolveRateLimitPerMin,
 } from "./rate-limit.js";
 
@@ -66,11 +70,17 @@ interface Env {
   CEREBRAS_API_KEY?: string;
   /** OpenRouter API key (https://openrouter.ai/keys). Free tier via :free models. */
   OPENROUTER_API_KEY?: string;
+  /** GitHub Personal Access Token. Free tier via https://models.github.ai. */
+  GITHUB_MODELS_API_KEY?: string;
+  /** Mistral La Plateforme key. Free experimental tier — https://console.mistral.ai. */
+  MISTRAL_API_KEY?: string;
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
   DEFAULT_GROQ_MODEL?: string;
   DEFAULT_CEREBRAS_MODEL?: string;
+  DEFAULT_GITHUB_MODELS_MODEL?: string;
+  DEFAULT_MISTRAL_MODEL?: string;
   /** Comma-separated OpenRouter model fallback list. Defaults to a hand-picked diverse list. */
   DEFAULT_OPENROUTER_MODELS?: string;
   // Per-backend circuit breaker, exact-match response cache, and per-IP
@@ -162,6 +172,8 @@ export default {
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
           groq_model: env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
           cerebras_model: env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL,
+          github_models_model: env.DEFAULT_GITHUB_MODELS_MODEL ?? DEFAULT_GITHUB_MODELS_MODEL,
+          mistral_model: env.DEFAULT_MISTRAL_MODEL ?? DEFAULT_MISTRAL_MODEL,
           openrouter_models: openRouterModels,
           backends: {
             "workers-ai": true, // bound by the AI binding, always available
@@ -171,6 +183,8 @@ export default {
             // callers scanning the public /healthz probe.
             groq: Boolean(env.GROQ_API_KEY),
             cerebras: Boolean(env.CEREBRAS_API_KEY),
+            "github-models": Boolean(env.GITHUB_MODELS_API_KEY),
+            mistral: Boolean(env.MISTRAL_API_KEY),
             openrouter: Boolean(env.OPENROUTER_API_KEY),
             // Do not expose whether a paid Anthropic key is configured to
             // unauthenticated callers — its presence is a billing secret.
@@ -194,14 +208,20 @@ export default {
       return jsonError(auth.status, "authentication_error", auth.message);
     }
 
-    // Per-IP rate limit. Sits between auth and upstream dispatch so
-    // bad citizens don't trip our circuit breakers or burn free quota.
-    // Fails open if KV is unavailable so we don't accidentally block
-    // legitimate traffic on infra trouble.
-    const rateLimitPerMin = resolveRateLimitPerMin(env.RATE_LIMIT_PER_MIN);
-    if (rateLimitPerMin > 0) {
-      const ip = getClientIp(request);
-      const decision = await checkRateLimit(ip, rateLimitPerMin, env.CIRCUIT);
+    // Rate limit scoped by `x-fortune-consumer` header (when set) or by
+    // IP. Per-consumer scoping prevents one runaway consumer from
+    // draining everyone else's quota; per-IP is the fallback when the
+    // consumer doesn't identify itself. Per-consumer overrides via
+    // RATE_LIMIT_PER_MIN_<CONSUMER> env (e.g. RATE_LIMIT_PER_MIN_LENA=500).
+    // Fails open if KV is unavailable.
+    const globalRateLimit = resolveRateLimitPerMin(env.RATE_LIMIT_PER_MIN);
+    if (globalRateLimit > 0) {
+      const { scope, kind } = getRateLimitScope(request);
+      const effectiveLimit =
+        kind === "consumer"
+          ? resolveConsumerRateLimit(scope, globalRateLimit, env as unknown as Record<string, string | undefined>)
+          : globalRateLimit;
+      const decision = await checkRateLimit(scope, effectiveLimit, env.CIRCUIT);
       if (!decision.allowed) {
         statsEvents.push({ kind: "request" }, { kind: "rate_limited" });
         flushStats();
@@ -210,7 +230,7 @@ export default {
             type: "error",
             error: {
               type: "rate_limit_error",
-              message: `Rate limit exceeded: ${decision.count}/${decision.limit} req/min from ${ip}. Retry in ${decision.retryAfterSeconds}s.`,
+              message: `Rate limit exceeded: ${decision.count}/${decision.limit} req/min for ${kind}=${scope}. Retry in ${decision.retryAfterSeconds}s.`,
             },
           }),
           {
@@ -220,6 +240,7 @@ export default {
               "access-control-allow-origin": "*",
               "retry-after": String(decision.retryAfterSeconds),
               "x-fortune-llm-rate-limit": `${decision.count}/${decision.limit}`,
+              "x-fortune-llm-rate-scope": `${kind}:${scope}`,
             },
           },
         );
@@ -545,8 +566,22 @@ async function invokeTier(
     headers.set("x-fortune-llm-model", model);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
+  // BYOK helper: every non-workers-ai tier supports per-request key
+  // override via x-fortune-byok-<provider>: <key>. Header wins; shared
+  // env key is the fallback. `null` → tier not configured (handler
+  // throws and dispatcher advances to the next tier).
+  const reqHeaders = request.headers;
+  const resolveKey = (provider: ByokProvider, shared: string | undefined) =>
+    resolveProviderKey(provider, shared, reqHeaders);
+  const annotateByok = (headers: Headers, source: "byok" | "shared") => {
+    if (source === "byok") headers.set("x-fortune-llm-byok", "true");
+  };
+
   if (tier === "gemini") {
-    const keys = resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
+    const byok = resolveKey("gemini", undefined);
+    const keys = byok
+      ? [byok.key]
+      : resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
     if (keys.length === 0) {
       throw new Error("GEMINI_API_KEY not configured");
     }
@@ -554,58 +589,83 @@ async function invokeTier(
     const resp = await callGeminiWithRotation(keys, model, parsed, isQuotaError);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
-    if (keys.length > 1) {
-      headers.set("x-fortune-llm-gemini-keys", String(keys.length));
-    }
+    if (keys.length > 1) headers.set("x-fortune-llm-gemini-keys", String(keys.length));
+    if (byok) annotateByok(headers, byok.source);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   if (tier === "groq") {
-    if (!env.GROQ_API_KEY) {
-      throw new Error("GROQ_API_KEY not configured");
-    }
+    const resolved = resolveKey("groq", env.GROQ_API_KEY);
+    if (!resolved) throw new Error("GROQ_API_KEY not configured");
     const model = env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
-    const resp = await callGroq({ apiKey: env.GROQ_API_KEY, model }, parsed);
+    const resp = await callGroq({ apiKey: resolved.key, model }, parsed);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
+    annotateByok(headers, resolved.source);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   if (tier === "cerebras") {
-    if (!env.CEREBRAS_API_KEY) {
-      throw new Error("CEREBRAS_API_KEY not configured");
-    }
+    const resolved = resolveKey("cerebras", env.CEREBRAS_API_KEY);
+    if (!resolved) throw new Error("CEREBRAS_API_KEY not configured");
     const model = env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL;
-    const resp = await callCerebras({ apiKey: env.CEREBRAS_API_KEY, model }, parsed);
+    const resp = await callCerebras({ apiKey: resolved.key, model }, parsed);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
+    annotateByok(headers, resolved.source);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  if (tier === "github-models") {
+    const resolved = resolveKey("github-models", env.GITHUB_MODELS_API_KEY);
+    if (!resolved) throw new Error("GITHUB_MODELS_API_KEY not configured");
+    const model = env.DEFAULT_GITHUB_MODELS_MODEL ?? DEFAULT_GITHUB_MODELS_MODEL;
+    const resp = await callGitHubModels({ apiKey: resolved.key, model }, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    annotateByok(headers, resolved.source);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  if (tier === "mistral") {
+    const resolved = resolveKey("mistral", env.MISTRAL_API_KEY);
+    if (!resolved) throw new Error("MISTRAL_API_KEY not configured");
+    const model = env.DEFAULT_MISTRAL_MODEL ?? DEFAULT_MISTRAL_MODEL;
+    const resp = await callMistral({ apiKey: resolved.key, model }, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    annotateByok(headers, resolved.source);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   if (tier === "openrouter") {
-    if (!env.OPENROUTER_API_KEY) {
-      throw new Error("OPENROUTER_API_KEY not configured");
-    }
+    const resolved = resolveKey("openrouter", env.OPENROUTER_API_KEY);
+    if (!resolved) throw new Error("OPENROUTER_API_KEY not configured");
     const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
-    const resp = await callOpenRouter({ apiKey: env.OPENROUTER_API_KEY, models }, parsed);
+    const resp = await callOpenRouter({ apiKey: resolved.key, models }, parsed);
     const headers = new Headers(resp.headers);
-    // The response includes the model OpenRouter actually picked; surface
-    // it as x-fortune-llm-model so consumers can see which fallback won.
     headers.set("x-fortune-llm-model", models[0] as string);
     headers.set("x-fortune-llm-openrouter-models", String(models.length));
+    annotateByok(headers, resolved.source);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   // tier === "anthropic" — paid escape valve. Auto-appended when ANTHROPIC_API_KEY
   // is configured (free chain failed → paid), or reached via explicit metadata
-  // override.
-  if (!env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY not configured");
+  // override. BYOK applies here too — a consumer can pass their own Anthropic
+  // key to offload billing.
+  const anth = resolveKey("anthropic", env.ANTHROPIC_API_KEY);
+  if (!anth) throw new Error("ANTHROPIC_API_KEY not configured");
+  const resp = await forwardToAnthropic(request, rawBody, anth.key);
+  if (anth.source === "byok") {
+    const headers = new Headers(resp.headers);
+    annotateByok(headers, "byok");
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
-  return forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY);
+  return resp;
 }
 
 // Diagnostic response headers exposed to cross-origin clients.
 const EXPOSE_HEADERS =
   "x-fortune-llm-route, x-fortune-llm-chain, x-fortune-llm-reason, " +
   "x-fortune-llm-prior-errors, x-fortune-llm-skipped, x-fortune-llm-model, " +
-  "x-fortune-llm-gemini-keys";
+  "x-fortune-llm-gemini-keys, x-fortune-llm-openrouter-models, " +
+  "x-fortune-llm-cache, x-fortune-llm-cache-age-s, x-fortune-llm-rate-limit, " +
+  "x-fortune-llm-rate-scope, x-fortune-llm-byok";
 
 function jsonError(status: number, type: string, message: string): Response {
   return new Response(JSON.stringify({ type: "error", error: { type, message } }), {

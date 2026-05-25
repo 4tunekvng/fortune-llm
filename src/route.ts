@@ -54,6 +54,8 @@ export type BackendKind =
   | "groq"
   | "cerebras"
   | "openrouter"
+  | "github-models"
+  | "mistral"
   | "anthropic";
 
 export interface RouteChain {
@@ -97,6 +99,12 @@ export function decideRoute(
   }
   if (meta?.fortune_route === "openrouter") {
     return { tiers: ["openrouter"], reason: "explicit metadata.fortune_route=openrouter" };
+  }
+  if (meta?.fortune_route === "github-models") {
+    return { tiers: ["github-models"], reason: "explicit metadata.fortune_route=github-models" };
+  }
+  if (meta?.fortune_route === "mistral") {
+    return { tiers: ["mistral"], reason: "explicit metadata.fortune_route=mistral" };
   }
   // "free" forces the default free chain even when anthropicFallback is on.
   // Lets a caller opt out of paid escalation per-request (e.g. background
@@ -159,15 +167,25 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
     return ["gemini", "openrouter", "workers-ai"];
   }
 
-  // Default for both plain chat and tool-using calls. Stacks five
+  // Default for both plain chat and tool-using calls. Stacks SEVEN
   // independent free-quota pools in order:
-  //   groq        — fastest, native tool use, biggest free RPM
-  //   cerebras    — also very fast (custom silicon), independent Cerebras quota
-  //   workers-ai  — Cloudflare account-scoped neurons
-  //   gemini      — per-Google-API-key quota (multi-key rotation supported)
-  //   openrouter  — meta-router with its own free pool + multi-model fallback
-  // Five independent quotas = "rarely hits anthropic" in practice.
-  return ["groq", "cerebras", "workers-ai", "gemini", "openrouter"];
+  //   groq           — fastest, native tool use, biggest free RPM
+  //   cerebras       — very fast (custom silicon), independent quota
+  //   mistral        — Mistral La Plateforme free experimental tier
+  //   workers-ai     — Cloudflare account-scoped neurons
+  //   gemini         — per-Google-API-key quota (multi-key rotation)
+  //   github-models  — Azure-backed, free with any GitHub account
+  //   openrouter     — meta-router with multi-model fallback
+  // Seven independent quotas = "rarely hits anthropic" even at scale.
+  return [
+    "groq",
+    "cerebras",
+    "mistral",
+    "workers-ai",
+    "gemini",
+    "github-models",
+    "openrouter",
+  ];
 }
 
 function freeChainReason(req: AnthropicMessagesRequest, chain: BackendKind[]): string {

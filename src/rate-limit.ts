@@ -1,30 +1,35 @@
 /**
- * Per-IP rate limit using a KV counter bucketed by minute.
+ * Rate limit using a KV counter bucketed by minute.
  *
- * Why: the gateway has one shared `GATEWAY_TOKEN` used by every consumer
- * app. If any one consumer (a runaway loop, a misbehaving cron job, a
- * leaked token) blasts the gateway, it drains the shared free-tier
- * quota for every other consumer. A per-IP cap keeps one bad citizen
- * from breaking the others.
+ * Key shape: `rate:<scope>:<minute>` where <scope> is either:
+ *   - the consumer name (from `x-fortune-consumer: <name>` header), OR
+ *   - the client IP (cf-connecting-ip → x-forwarded-for → "unknown")
+ *
+ * Why two-tier scoping: the gateway is reached by N consumer apps
+ * (knox, lena, network-agent, …) often from the same Vercel/CF edge.
+ * Pure IP-scoping would let one app drain another's quota when they
+ * happen to share an origin IP. With `x-fortune-consumer`, each app
+ * gets its own bucket — one runaway agent only burns its own budget.
+ * Consumers that don't set the header fall back to IP-scoping (the
+ * old behavior).
+ *
+ * Per-consumer caps can be overridden in env via
+ * `RATE_LIMIT_PER_MIN_<CONSUMER>` (uppercased, e.g.
+ * `RATE_LIMIT_PER_MIN_LENA=500`). Unmatched consumers use the global
+ * `RATE_LIMIT_PER_MIN` default.
  *
  * Mechanism:
- *   - Key: `rate:<ip>:<minute>`. The minute bucket auto-expires via
- *     KV TTL so we don't need to clean up.
  *   - On each request, atomically read the current count, reject if
  *     >= limit, otherwise increment. KV is eventually-consistent so
  *     there's a small race-window where a spike can sneak slightly
- *     over the limit — acceptable for our purposes (this is rough
- *     abuse protection, not strict rate-shaping).
+ *     over the limit — acceptable for rough abuse protection.
  *   - When KV isn't bound (local dev) the limiter no-ops.
- *
- * Tuning: the default is 200 req/min per IP. That's generous enough
- * to never hit on normal use (any single consumer running at e.g. one
- * request every couple seconds), and tight enough that a runaway loop
- * burns out within minutes instead of hours.
  */
 
 export const DEFAULT_RATE_LIMIT_PER_MIN = 200;
 const KEY_PREFIX = "rate:";
+/** Sanitize consumer name for KV key safety + env-var lookup. */
+const CONSUMER_RE = /^[a-z0-9_-]{1,32}$/i;
 
 export interface RateLimitDecision {
   allowed: boolean;
@@ -37,9 +42,9 @@ export interface RateLimitDecision {
 }
 
 /**
- * Identify the consumer for rate-limiting. Order of preference:
- *   1. `x-forwarded-for` first hop (Cloudflare sets this for non-CF clients).
- *   2. `cf-connecting-ip` (Cloudflare's authoritative client IP).
+ * Identify the consumer IP for rate-limiting. Order of preference:
+ *   1. `cf-connecting-ip` (Cloudflare's authoritative client IP).
+ *   2. `x-forwarded-for` first hop.
  *   3. fallback string "unknown" so we don't crash if no IP is available.
  */
 export function getClientIp(request: Request): string {
@@ -54,12 +59,45 @@ export function getClientIp(request: Request): string {
 }
 
 /**
- * Check and increment the rate-limit counter for this IP. KV-backed so
- * the count is shared across all Worker isolates. Eventually-consistent
- * by design.
+ * Resolve the rate-limit scope: the consumer name (if a valid
+ * `x-fortune-consumer` header is set) or the client IP. The scope
+ * becomes the bucket key for rate-limiting AND the lookup for any
+ * per-consumer limit override.
+ *
+ * Sanitized: must match `[a-z0-9_-]{1,32}` to prevent KV-key-injection
+ * or absurdly long bucket keys. Invalid headers fall back to IP-scope.
+ */
+export function getRateLimitScope(request: Request): { scope: string; kind: "consumer" | "ip" } {
+  const raw = request.headers.get("x-fortune-consumer");
+  if (raw && CONSUMER_RE.test(raw)) {
+    return { scope: raw.toLowerCase(), kind: "consumer" };
+  }
+  return { scope: getClientIp(request), kind: "ip" };
+}
+
+/**
+ * Per-consumer rate limit override. Operators can set
+ * `RATE_LIMIT_PER_MIN_LENA=500` in wrangler.toml to give Lena a higher
+ * ceiling than the global default. Unmatched consumers use the global
+ * value.
+ */
+export function resolveConsumerRateLimit(
+  consumer: string,
+  globalDefault: number,
+  envBag: Record<string, string | undefined>,
+): number {
+  if (!CONSUMER_RE.test(consumer)) return globalDefault;
+  const envName = `RATE_LIMIT_PER_MIN_${consumer.toUpperCase().replace(/-/g, "_")}`;
+  return resolveRateLimitPerMin(envBag[envName] ?? String(globalDefault));
+}
+
+/**
+ * Check and increment the rate-limit counter for this scope (consumer
+ * name OR IP). KV-backed so the count is shared across all Worker
+ * isolates. Eventually-consistent by design.
  */
 export async function checkRateLimit(
-  ip: string,
+  scope: string,
   limit: number,
   kv: KVNamespace | undefined,
 ): Promise<RateLimitDecision> {
@@ -68,7 +106,7 @@ export async function checkRateLimit(
   }
   const now = Date.now();
   const minute = Math.floor(now / 60_000);
-  const key = `${KEY_PREFIX}${ip}:${minute}`;
+  const key = `${KEY_PREFIX}${scope}:${minute}`;
   // Seconds left in this minute bucket. KV TTL minimum is 60s, so we
   // bump the minimum to keep KV happy even at the very end of the
   // window.

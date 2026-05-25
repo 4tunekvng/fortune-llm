@@ -10,6 +10,8 @@ DEFAULT_OSS_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 DEFAULT_CEREBRAS_MODEL = "gpt-oss-120b"
+DEFAULT_GITHUB_MODELS_MODEL = "openai/gpt-4o-mini"
+DEFAULT_MISTRAL_MODEL = "mistral-small-latest"
 # OpenRouter free models are heavily contested per-model; pass a list of
 # candidates and OpenRouter's `models: []` fallback picks the first
 # available. OpenRouter API caps the list at 3 entries — longer lists
