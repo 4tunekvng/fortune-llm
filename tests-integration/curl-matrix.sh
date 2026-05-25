@@ -279,6 +279,48 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────────
+# T16 — Phase 4: output_config (structured output) served by free chain
+#
+# THE proof for Phase 4: send the wire-format the Anthropic SDK's
+# messages.parse() uses, pin to a free tier, verify (a) status 200,
+# (b) route is NOT anthropic, (c) the response text is valid JSON
+# conforming to the schema.
+# ────────────────────────────────────────────────────────────────
+T16=$WORK/t16; mkdir -p "$T16"
+payload='{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 200,
+  "messages": [{"role":"user","content":"Imagine you recovered $99.99 from Verizon with medium confidence. Return that as structured data."}],
+  "output_config": {
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "amount_recovered": {"type": "number"},
+          "institution": {"type": "string"},
+          "confidence": {"type": "string", "enum": ["low","medium","high"]}
+        },
+        "required": ["amount_recovered","institution","confidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "metadata": {"fortune_route": "gemini", "fortune_no_cache": true}
+}'
+post_messages "$payload" "$T16"
+status=$(head -1 "$T16/full" | awk '{print $2}')
+route=$(hdr "$T16/headers" "x-fortune-llm-route")
+# Parse the JSON body to extract the text content (the model's JSON answer).
+text_content=$(python3 -c "import json,sys; d=json.load(open('$T16/body')); print(next((b['text'] for b in d.get('content',[]) if b.get('type')=='text'), ''))" 2>/dev/null)
+parsed_ok=$(python3 -c "import json,sys; obj=json.loads('''$text_content'''); print('ok' if 'amount_recovered' in obj and 'institution' in obj and 'confidence' in obj else 'bad')" 2>/dev/null)
+if [[ "$status" == "200" && "$route" != "anthropic" && "$parsed_ok" == "ok" ]]; then
+  pass "T16 Phase 4: output_config served by free tier ($route)" "status=$status route=$route parsed=$text_content"
+else
+  fail "T16 output_config via free chain" "status=$status route=$route parsed=$parsed_ok" "body=$(cat $T16/body | head -c 200)"
+fi
+
+# ────────────────────────────────────────────────────────────────
 # Summary
 # ────────────────────────────────────────────────────────────────
 echo "================================================================"

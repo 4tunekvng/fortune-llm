@@ -25,6 +25,7 @@ import type {
   GeminiPart,
   GeminiResponse,
 } from "./types.js";
+import { getOutputSchemaObject } from "./structured-output.js";
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
@@ -93,6 +94,20 @@ export function buildGeminiInput(req: AnthropicMessagesRequest): GeminiGenerateR
     if (toolConfig) {
       out.toolConfig = toolConfig;
     }
+  }
+
+  // Structured output via Anthropic's output_config. Gemini accepts a
+  // sanitized JSON-schema subset as responseSchema; the sanitizer
+  // already in this file walks the schema and drops fields Gemini
+  // rejects (additionalProperties, $defs, etc.). Pair with
+  // responseMimeType:application/json so the model emits raw JSON
+  // (no markdown fences) — which is what the consumer's SDK then
+  // JSON.parses into parsed_output locally.
+  const outputSchema = getOutputSchemaObject(req);
+  if (outputSchema && out.generationConfig) {
+    (out.generationConfig as Record<string, unknown>).responseMimeType = "application/json";
+    (out.generationConfig as Record<string, unknown>).responseSchema =
+      sanitizeJsonSchemaForGemini(outputSchema);
   }
 
   return out;

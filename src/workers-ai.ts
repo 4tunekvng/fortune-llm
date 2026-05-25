@@ -31,6 +31,7 @@ import type {
   WorkersAiChatMessage,
   WorkersAiChatResponse,
 } from "./types.js";
+import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./structured-output.js";
 
 export interface AiBinding {
   run(model: string, input: unknown): Promise<unknown>;
@@ -130,6 +131,14 @@ export function buildWorkersAiInput(req: AnthropicMessagesRequest): WorkersAiCha
     messages.push(...translateMessage(m));
   }
 
+  // Structured output via output_config — translate to OpenAI-style
+  // response_format. Lives here in buildWorkersAiInput so the same body
+  // shape flows to the Workers AI binding AND to every HTTP OpenAI-compat
+  // provider (Groq/Cerebras/OpenRouter all consume buildWorkersAiInput's
+  // output via openai-compatible.ts).
+  const outputFmt = extractOutputSchema(req);
+  const responseFormat = outputFmt ? outputSchemaToOpenAIResponseFormat(outputFmt).response_format : undefined;
+
   return {
     messages,
     tools: translateTools(req.tools),
@@ -142,6 +151,7 @@ export function buildWorkersAiInput(req: AnthropicMessagesRequest): WorkersAiCha
     ...(Array.isArray(req.stop_sequences) && req.stop_sequences.length > 0
       ? { stop: req.stop_sequences }
       : {}),
+    ...(responseFormat ? { response_format: responseFormat } : {}),
   };
 }
 

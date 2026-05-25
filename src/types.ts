@@ -96,6 +96,16 @@ export interface WorkersAiChatRequest {
   stream?: boolean;
   /** OpenAI-style stop sequences (up to 4). Forwarded to Groq, OpenRouter, and Workers AI. */
   stop?: string | string[];
+  /**
+   * OpenAI-style structured output. Forwarded to providers that
+   * understand `response_format` (Groq, Cerebras, OpenRouter,
+   * newer Workers AI models). The Anthropic gateway translates
+   * the SDK's `output_config.format` into this field.
+   */
+  response_format?: {
+    type: "json_schema";
+    json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean };
+  };
 }
 
 export interface WorkersAiChatMessage {

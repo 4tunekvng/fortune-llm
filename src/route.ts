@@ -108,30 +108,24 @@ export function decideRoute(
     };
   }
 
-  // Anthropic-native SDK features — free backends don't speak them.
-  // `output_config` is the messages.parse() structured-output helper.
-  // Forwarding it to Workers AI / Gemini returns code-fenced JSON which
-  // the SDK's text-mode parser then rejects. Skip straight to Anthropic.
-  if (hasOutputConfig(req)) {
-    if (options.anthropicFallback) {
-      return {
-        tiers: ["anthropic"],
-        reason: "output_config (json_schema structured output) — Anthropic-native, free tiers don't support it",
-      };
-    }
-    // No paid backend configured — fall through to default and let the
-    // free tiers fail loudly rather than silently producing bad JSON.
-  }
-
+  // Structured output via output_config flows through the regular free
+  // chain as of Phase 4. Every free provider now translates the schema
+  // to its native structured-output feature in code:
+  //   - Groq / Cerebras / OpenRouter / Workers AI → response_format: { type:"json_schema", ... }
+  //   - Gemini → generationConfig.responseSchema + responseMimeType:"application/json"
+  // If a provider's model rejects the schema (strict-mode-incompatible
+  // or model lacks support), the call 400s and the dispatcher advances
+  // to the next tier. Anthropic remains the last-resort auto-fallback.
   const free = defaultFreeChain(req);
   const baseReason = freeChainReason(req, free);
+  const structured = hasOutputConfig(req) ? " (structured output via response_format / responseSchema)" : "";
   if (options.anthropicFallback) {
     return {
       tiers: [...free, "anthropic"],
-      reason: `${baseReason}; anthropic appended as last-resort (free chain failed → paid)`,
+      reason: `${baseReason}${structured}; anthropic appended as last-resort (free chain failed → paid)`,
     };
   }
-  return { tiers: free, reason: baseReason };
+  return { tiers: free, reason: `${baseReason}${structured}` };
 }
 
 function hasOutputConfig(req: AnthropicMessagesRequest): boolean {

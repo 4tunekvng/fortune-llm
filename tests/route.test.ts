@@ -163,10 +163,11 @@ describe("decideRoute — anthropic auto-fallback", () => {
     expect(d.tiers.filter((t) => t === "anthropic")).toHaveLength(0);
   });
 
-  it("routes requests with output_config (json_schema) directly to anthropic when configured", () => {
-    // messages.parse() helper from the SDK sets output_config.format.type=json_schema.
-    // Free backends don't understand this field and return code-fenced JSON which
-    // the SDK's text-mode parser then chokes on. Skip the free tiers entirely.
+  it("routes output_config (json_schema) through the free chain — providers translate to native structured output", () => {
+    // Phase 4: free tiers now natively understand structured output via
+    // response_format (OpenAI-compat) / responseSchema (Gemini). We
+    // dispatch through the regular free chain with anthropic appended
+    // as last-resort, same as any other request.
     const req = {
       ...baseReq(),
       output_config: {
@@ -174,11 +175,11 @@ describe("decideRoute — anthropic auto-fallback", () => {
       },
     } as unknown as AnthropicMessagesRequest;
     const d = decideRoute(req, { anthropicFallback: true });
-    expect(d.tiers).toEqual(["anthropic"]);
-    expect(d.reason).toMatch(/output_config/);
+    expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN, "anthropic"]);
+    expect(d.reason).toMatch(/structured output/);
   });
 
-  it("falls through to free chain when output_config is present but anthropic not configured (fails loud)", () => {
+  it("free chain still applies when output_config is present and anthropic is not configured", () => {
     const req = {
       ...baseReq(),
       output_config: {

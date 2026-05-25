@@ -124,10 +124,12 @@ export async function callOpenAICompatible(
     (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
   const wantsStream = Boolean(body.stream) && !requireTools;
 
-  // extraBody is shallow-merged AFTER model so provider-specific extensions
-  // (OpenRouter's `models: []`, `provider: {...}`) override or complement
-  // the canonical fields. Order matters: extraBody last lets a provider
-  // override stream/model if it really has to.
+  // Structured output (response_format) is already injected by
+  // buildWorkersAiInput above when the request has output_config.
+  // extraBody is shallow-merged AFTER model so provider-specific
+  // extensions (OpenRouter's `models: []`, `provider: {...}`) override
+  // or complement the canonical fields. Order matters: extraBody last
+  // lets a provider override stream/model if it really has to.
   const httpBody = { ...body, model: config.model, stream: wantsStream, ...config.extraBody };
 
   const headers: Record<string, string> = {
