@@ -56,15 +56,11 @@ export function authenticate(request: Request, expected: string | undefined): Au
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
-  // Compare over the longer of the two lengths so the loop count does not
-  // reveal the length of either string to a timing oracle.  We XOR
-  // corresponding char-codes (treating out-of-bounds as 0) and accumulate
-  // any mismatch — including the length difference itself — without an
-  // early-return branch.
-  const len = Math.max(a.length, b.length);
-  let mismatch = a.length ^ b.length; // non-zero when lengths differ
-  for (let i = 0; i < len; i++) {
-    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return mismatch === 0;
+  const enc = new TextEncoder();
+  const aBuf = enc.encode(a);
+  const bBuf = enc.encode(b);
+  if (aBuf.length !== bBuf.length) return false;
+  // crypto.subtle.timingSafeEqual is a Cloudflare Workers runtime extension
+  // that performs native constant-time comparison (not available in all JS runtimes).
+  return (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean }).timingSafeEqual(aBuf, bBuf);
 }
