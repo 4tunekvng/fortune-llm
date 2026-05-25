@@ -59,8 +59,19 @@ function constantTimeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder();
   const aBuf = enc.encode(a);
   const bBuf = enc.encode(b);
-  if (aBuf.length !== bBuf.length) return false;
-  // crypto.subtle.timingSafeEqual is a Cloudflare Workers runtime extension
-  // that performs native constant-time comparison (not available in all JS runtimes).
-  return (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean }).timingSafeEqual(aBuf, bBuf);
+  // Pad the shorter buffer to match the longer so that timingSafeEqual (which
+  // requires equal-length inputs) can always run.  Comparing over the max
+  // length avoids an early-return branch that would otherwise leak the byte-
+  // length of the expected token to a timing attacker.
+  const len = Math.max(aBuf.length, bBuf.length);
+  const aPad = new Uint8Array(len);
+  const bPad = new Uint8Array(len);
+  aPad.set(aBuf);
+  bPad.set(bBuf);
+  // crypto.subtle.timingSafeEqual is a Cloudflare Workers runtime extension.
+  const equal = (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBufferView, b: ArrayBufferView): boolean }).timingSafeEqual(aPad, bPad);
+  // Even if the padded comparison passes (impossible when lengths differ, since
+  // the padding zeros will mismatch the non-zero content), enforce length equality
+  // so an attacker cannot craft a prefix that satisfies the byte comparison.
+  return equal && aBuf.length === bBuf.length;
 }
