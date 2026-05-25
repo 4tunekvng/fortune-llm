@@ -35,6 +35,18 @@ import {
   tripCircuit,
   type CircuitState,
 } from "./circuit-breaker.js";
+import {
+  computeCacheKey,
+  isCacheable,
+  readCache,
+  resolveCacheTtlSeconds,
+  writeCache,
+} from "./cache.js";
+import {
+  checkRateLimit,
+  getClientIp,
+  resolveRateLimitPerMin,
+} from "./rate-limit.js";
 
 interface Env {
   AI: { run(model: string, input: unknown): Promise<unknown> };
@@ -53,12 +65,17 @@ interface Env {
   DEFAULT_GROQ_MODEL?: string;
   /** Comma-separated OpenRouter model fallback list. Defaults to a hand-picked diverse list. */
   DEFAULT_OPENROUTER_MODELS?: string;
-  // Per-backend circuit breaker. Optional: if unbound (e.g. local dev
-  // without `wrangler kv namespace create CIRCUIT`), the breaker no-ops
-  // and we fall through to the old retry-every-time behavior.
+  // Per-backend circuit breaker, exact-match response cache, and per-IP
+  // rate-limiting counters all share this KV namespace under different
+  // key prefixes (`circuit:`, `cache:`, `rate:`). When unbound (e.g.
+  // local dev), each subsystem no-ops gracefully.
   CIRCUIT?: KVNamespace;
-  // Override the default trip duration (1h). Value is in milliseconds.
+  // Override the default circuit-breaker trip duration (1h, in ms).
   CIRCUIT_TRIP_DURATION_MS?: string;
+  /** Cache TTL in seconds. Default 24h (86400). Set to 0 to disable. */
+  CACHE_TTL_SECONDS?: string;
+  /** Per-IP request cap per minute. Default 200. Set to 0 to disable. */
+  RATE_LIMIT_PER_MIN?: string;
 }
 
 let circuitMissingWarned = false;
@@ -105,6 +122,36 @@ export default {
     const auth = authenticate(request, env.GATEWAY_TOKEN);
     if (!auth.ok) {
       return jsonError(auth.status, "authentication_error", auth.message);
+    }
+
+    // Per-IP rate limit. Sits between auth and upstream dispatch so
+    // bad citizens don't trip our circuit breakers or burn free quota.
+    // Fails open if KV is unavailable so we don't accidentally block
+    // legitimate traffic on infra trouble.
+    const rateLimitPerMin = resolveRateLimitPerMin(env.RATE_LIMIT_PER_MIN);
+    if (rateLimitPerMin > 0) {
+      const ip = getClientIp(request);
+      const decision = await checkRateLimit(ip, rateLimitPerMin, env.CIRCUIT);
+      if (!decision.allowed) {
+        return new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "rate_limit_error",
+              message: `Rate limit exceeded: ${decision.count}/${decision.limit} req/min from ${ip}. Retry in ${decision.retryAfterSeconds}s.`,
+            },
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "access-control-allow-origin": "*",
+              "retry-after": String(decision.retryAfterSeconds),
+              "x-fortune-llm-rate-limit": `${decision.count}/${decision.limit}`,
+            },
+          },
+        );
+      }
     }
 
     let rawBody = "";
@@ -170,6 +217,30 @@ export default {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must not exceed 65536.");
     }
 
+    // Cache lookup: a hit short-circuits the entire chain. Saves the
+    // full provider round-trip — biggest single quota multiplier on
+    // top of the multi-provider chain itself.
+    const cacheTtl = resolveCacheTtlSeconds(env.CACHE_TTL_SECONDS);
+    const cacheEligible = cacheTtl > 0 && isCacheable(parsed);
+    let cacheKey: string | null = null;
+    if (cacheEligible) {
+      cacheKey = await computeCacheKey(parsed);
+      const cached = await readCache(cacheKey, env.CIRCUIT);
+      if (cached) {
+        return new Response(cached.body, {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "access-control-allow-origin": "*",
+            "x-fortune-llm-route": cached.tier,
+            "x-fortune-llm-model": cached.model,
+            "x-fortune-llm-cache": "hit",
+            "x-fortune-llm-cache-age-s": String(Math.floor((Date.now() - cached.cachedAt) / 1000)),
+          },
+        });
+      }
+    }
+
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: Boolean(env.ANTHROPIC_API_KEY),
     });
@@ -217,6 +288,31 @@ export default {
         }
         headers.set("access-control-allow-origin", "*");
         headers.set("access-control-expose-headers", EXPOSE_HEADERS);
+
+        // Cache write: read the body so we can both store it and return
+        // it. Only cache 200 JSON responses (status is from invokeTier;
+        // we don't cache SSE streams or upstream errors).
+        if (
+          cacheEligible &&
+          cacheKey &&
+          resp.status === 200 &&
+          (resp.headers.get("content-type") ?? "").includes("application/json")
+        ) {
+          const bodyText = await resp.text();
+          const modelLabel = headers.get("x-fortune-llm-model") ?? tier;
+          await writeCache(
+            cacheKey,
+            { body: bodyText, tier, model: modelLabel, cachedAt: Date.now() },
+            cacheTtl,
+            env.CIRCUIT,
+          );
+          headers.set("x-fortune-llm-cache", "miss-stored");
+          return new Response(bodyText, { status: 200, statusText: resp.statusText, headers });
+        }
+
+        if (cacheEligible) {
+          headers.set("x-fortune-llm-cache", "miss-skip");
+        }
         return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
       } catch (err) {
         const msg = errorMessage(err);

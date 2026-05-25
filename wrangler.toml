@@ -34,16 +34,20 @@ DEFAULT_OPENROUTER_MODELS = "deepseek/deepseek-v4-flash:free,openai/gpt-oss-120b
 [ai]
 binding = "AI"
 
-# Per-backend circuit breaker. Tracks which tiers have blown their
-# free-tier quota so subsequent requests skip them instead of repeatedly
-# burning a fetch on a guaranteed failure. Create the namespace once:
+# Shared KV namespace for circuit-breaker state, response cache, and
+# per-IP rate-limit counters. Three subsystems, three key prefixes:
+#   circuit:<tier>          → circuit-breaker state (quota tripped)
+#   cache:<sha256-prefix>   → exact-match response cache (24h default)
+#   rate:<ip>:<minute>      → per-IP request count (60s buckets)
 #
+# Create the namespace once:
 #   wrangler kv namespace create CIRCUIT
 #   wrangler kv namespace create CIRCUIT --preview
 #
-# Then replace the placeholders below with the printed ids. Override
-# the trip duration (default 1h) by adding to [vars]:
-#   CIRCUIT_TRIP_DURATION_MS = "1800000"   # 30 min
+# Tunables via [vars] (all optional):
+#   CIRCUIT_TRIP_DURATION_MS = "1800000"   # circuit breaker trip duration, default 1h
+#   CACHE_TTL_SECONDS        = "86400"     # response cache TTL, default 24h, 0 disables
+#   RATE_LIMIT_PER_MIN       = "200"       # per-IP req/min, default 200, 0 disables
 [[kv_namespaces]]
 binding = "CIRCUIT"
 id = "2ff745a8a79e47fd8a3728da8f81ce6d"

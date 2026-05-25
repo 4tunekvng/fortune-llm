@@ -78,14 +78,46 @@ the chain comfortably handles thousands of requests/day on free.
 Diagnostic headers on every response:
 
 ```
-x-fortune-llm-route:          groq | workers-ai | gemini | openrouter | anthropic
-x-fortune-llm-model:          the actual model executed
-x-fortune-llm-chain:          groq,workers-ai,gemini,openrouter
-x-fortune-llm-reason:         why this chain was picked
-x-fortune-llm-prior-errors:   tier:msg | tier:msg   (only when a tier failed before success)
-x-fortune-llm-gemini-keys:    N                       (only when N > 1 keys are configured)
-x-fortune-llm-skipped:        tier:<ISO>,…            (tiers whose circuit was open)
+x-fortune-llm-route:                 groq | workers-ai | gemini | openrouter | anthropic
+x-fortune-llm-model:                 the actual model executed
+x-fortune-llm-chain:                 groq,workers-ai,gemini,openrouter
+x-fortune-llm-reason:                why this chain was picked
+x-fortune-llm-prior-errors:          tier:msg | tier:msg   (only when a tier failed before success)
+x-fortune-llm-gemini-keys:           N                       (only when N > 1 keys are configured)
+x-fortune-llm-openrouter-models:     N                       (size of the OpenRouter fallback list)
+x-fortune-llm-skipped:               tier:<ISO>,…            (tiers whose circuit was open)
+x-fortune-llm-cache:                 hit | miss-stored | miss-skip
+x-fortune-llm-cache-age-s:           seconds since the cached entry was written (hits only)
+x-fortune-llm-rate-limit:            count/limit (only on 429 responses)
 ```
+
+## Response cache
+
+Exact-match KV cache keyed on the request hash. A second identical
+request inside the TTL returns the cached response without touching any
+provider — biggest single quota multiplier on top of the multi-provider
+chain.
+
+| Setting | Default | Notes |
+|---|---|---|
+| TTL | 24h | Override via `CACHE_TTL_SECONDS` in `[vars]`. Floored at 60s (KV min), capped at 30 days. Set 0 to disable. |
+| Auto-cache when… | `temperature === 0` and no tools and not streaming | Apps that ask for determinism get the determinism benefit automatically. |
+| Per-request opt-in | `metadata.fortune_cache = true` | Caches even with temperature > 0. |
+| Per-request opt-out | `metadata.fortune_no_cache = true` | Always wins. |
+| Never cached | Streaming requests, tool-using requests, `fortune_require_tools` | Too in-context-sensitive to safely return verbatim. |
+
+## Rate limit
+
+Per-IP request counter, KV-backed, 60-second buckets. Stops a runaway
+loop or leaked-token abuse from draining the shared free quota for
+every other consumer.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Limit | 200 req/min per IP | Override via `RATE_LIMIT_PER_MIN` in `[vars]`. Set 0 to disable. |
+| Identification | `cf-connecting-ip` → `x-forwarded-for` first hop → `"unknown"` | Cloudflare always sets `cf-connecting-ip` for non-CF clients. |
+| Response on cap | `429 {"type":"rate_limit_error","message":…}` with `Retry-After` header | Standard back-off semantics. |
+| Failure mode | Fails open on KV unavailability | Better to miss a limit than block all traffic on infra trouble. |
 
 ## Endpoints
 
