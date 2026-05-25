@@ -54,5 +54,18 @@ binding = "CIRCUIT"
 id = "2ff745a8a79e47fd8a3728da8f81ce6d"
 preview_id = "cf3be286c95c445a88e4bd54a27f5627"
 
+# Durable Object for atomic stats counters. Replaces the old KV-backed
+# stats (which lost increments under concurrent traffic and lagged the
+# read by up to 60s). One DO instance globally ("stats-singleton") holds
+# the daily counters in SQLite; the gateway calls into it via ctx.waitUntil
+# so writes don't add latency.
+[[durable_objects.bindings]]
+name = "STATS_DO"
+class_name = "StatsDO"
+
+[[migrations]]
+tag = "v1-stats-do"
+new_sqlite_classes = ["StatsDO"]
+
 [observability]
 enabled = true

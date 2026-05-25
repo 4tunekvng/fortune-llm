@@ -44,7 +44,9 @@ import {
   writeCache,
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
-import { readStats, recordStats, type StatsEvent } from "./stats.js";
+import type { StatsEvent } from "./stats-do.js";
+// Re-export the DO class so the Workers runtime can find it.
+export { StatsDO } from "./stats-do.js";
 import {
   checkRateLimit,
   getClientIp,
@@ -82,6 +84,13 @@ interface Env {
   CACHE_TTL_SECONDS?: string;
   /** Per-IP request cap per minute. Default 200. Set to 0 to disable. */
   RATE_LIMIT_PER_MIN?: string;
+  /**
+   * Durable Object that owns the stats counters. Atomic increments via
+   * SQL UPSERT inside the DO actor — no lost updates, no read lag.
+   * Optional only because tests-without-bindings shouldn't crash; in
+   * prod this binding is always present.
+   */
+  STATS_DO?: DurableObjectNamespace;
 }
 
 let circuitMissingWarned = false;
@@ -89,21 +98,40 @@ let circuitMissingWarned = false;
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    // Stats events accumulate over the lifetime of this request and are
-    // flushed to KV via ctx.waitUntil so they don't add latency.
+    // Stats events accumulate over the lifetime of this request and
+    // are flushed to the StatsDO via ctx.waitUntil so the write doesn't
+    // add latency to the response path. The DO serializes increments
+    // through a single actor — no read-modify-write races, no KV cache
+    // lag.
     const statsEvents: StatsEvent[] = [];
+    const getStatsStub = () =>
+      env.STATS_DO ? env.STATS_DO.get(env.STATS_DO.idFromName("stats-singleton")) : null;
     const flushStats = () => {
-      if (statsEvents.length > 0 && env.CIRCUIT) {
-        ctx.waitUntil(recordStats(statsEvents.slice(), env.CIRCUIT));
-        statsEvents.length = 0;
+      if (statsEvents.length === 0) return;
+      const stub = getStatsStub();
+      if (stub) {
+        const batch = statsEvents.slice();
+        ctx.waitUntil((stub as unknown as { recordEvents(e: StatsEvent[]): Promise<void> }).recordEvents(batch));
       }
+      statsEvents.length = 0;
     };
 
-    // /stats — observability for cost-down impact. Reports today's
-    // request count, cache hit ratio, per-tier success/fail counts, and
-    // rate-limit rejections. No auth on read (it's not sensitive).
+    // /stats — observability for cost-down impact. Reads from the DO,
+    // so the data is strongly consistent with all prior recordEvents
+    // calls. No 60s KV edge-cache lag.
     if (request.method === "GET" && url.pathname === "/stats") {
-      const stats = await readStats(env.CIRCUIT);
+      const stub = getStatsStub();
+      if (!stub) {
+        return new Response(
+          JSON.stringify({ error: "STATS_DO binding not configured" }),
+          { status: 503, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
+        );
+      }
+      const stats = await (stub as unknown as { getStats(): Promise<{
+        date: string;
+        totals: { requests: number; cache_hits: number; cache_misses: number; rate_limited: number; errors: number };
+        per_tier: Record<string, { ok: number; fail: number }>;
+      }> }).getStats();
       const total = stats.totals.requests || 1;
       const cacheTotal = stats.totals.cache_hits + stats.totals.cache_misses || 1;
       return new Response(
