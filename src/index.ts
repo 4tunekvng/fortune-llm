@@ -79,7 +79,9 @@ export default {
             // callers scanning the public /healthz probe.
             groq: Boolean(env.GROQ_API_KEY),
             openrouter: Boolean(env.OPENROUTER_API_KEY),
-            anthropic: Boolean(env.ANTHROPIC_API_KEY),
+            // Do not expose whether a paid Anthropic key is configured to
+            // unauthenticated callers — its presence is a billing secret.
+            // Operators can check wrangler secrets or authenticate to infer it.
           },
         }),
         { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
