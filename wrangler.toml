@@ -8,7 +8,8 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 DEFAULT_OSS_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+DEFAULT_CEREBRAS_MODEL = "llama-4-scout-17b-16e-instruct"
 # OpenRouter free models are heavily contested per-model; pass a list of
 # candidates and OpenRouter's `models: []` fallback picks the first
 # available. OpenRouter API caps the list at 3 entries — longer lists

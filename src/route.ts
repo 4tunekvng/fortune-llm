@@ -48,7 +48,13 @@
 
 import type { AnthropicMessagesRequest, AnthropicContentBlock } from "./types.js";
 
-export type BackendKind = "workers-ai" | "gemini" | "groq" | "openrouter" | "anthropic";
+export type BackendKind =
+  | "workers-ai"
+  | "gemini"
+  | "groq"
+  | "cerebras"
+  | "openrouter"
+  | "anthropic";
 
 export interface RouteChain {
   tiers: BackendKind[];
@@ -85,6 +91,9 @@ export function decideRoute(
   }
   if (meta?.fortune_route === "groq") {
     return { tiers: ["groq"], reason: "explicit metadata.fortune_route=groq" };
+  }
+  if (meta?.fortune_route === "cerebras") {
+    return { tiers: ["cerebras"], reason: "explicit metadata.fortune_route=cerebras" };
   }
   if (meta?.fortune_route === "openrouter") {
     return { tiers: ["openrouter"], reason: "explicit metadata.fortune_route=openrouter" };
@@ -156,11 +165,15 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
     return ["gemini", "openrouter", "workers-ai"];
   }
 
-  // Default for both plain chat and tool-using calls: groq first (fastest,
-  // native tool use, big free quota), then workers-ai (separate Cloudflare
-  // quota), gemini (separate Google quota), openrouter (yet another pool).
-  // Four independent quotas = "rarely hits anthropic" in practice.
-  return ["groq", "workers-ai", "gemini", "openrouter"];
+  // Default for both plain chat and tool-using calls. Stacks five
+  // independent free-quota pools in order:
+  //   groq        — fastest, native tool use, biggest free RPM
+  //   cerebras    — also very fast (custom silicon), independent Cerebras quota
+  //   workers-ai  — Cloudflare account-scoped neurons
+  //   gemini      — per-Google-API-key quota (multi-key rotation supported)
+  //   openrouter  — meta-router with its own free pool + multi-model fallback
+  // Five independent quotas = "rarely hits anthropic" in practice.
+  return ["groq", "cerebras", "workers-ai", "gemini", "openrouter"];
 }
 
 function freeChainReason(req: AnthropicMessagesRequest, chain: BackendKind[]): string {

@@ -13,13 +13,16 @@
  *     we'd escalate to Anthropic further out.
  *
  * Eligibility (default policy):
- *   - request.stream is false (streaming requires SSE synthesis we're
- *     not building yet; phase 3 can add stream-from-cache)
- *   - temperature is 0 or absent (callers want determinism)
+ *   - temperature is 0 (callers want determinism — apps that didn't set
+ *     temperature default to Anthropic's 1.0, which means fresh)
  *     OR metadata.fortune_cache === true (explicit opt-in)
  *   - no tools[] (tool_use responses are too sensitive to in-context
  *     state to safely return verbatim)
  *   - metadata.fortune_no_cache !== true (explicit opt-out)
+ *
+ * Streaming requests ARE cacheable now (phase 2.5 stream-from-cache):
+ * cache-eligible stream:true requests are dispatched non-streaming
+ * upstream, cached as JSON, and re-emitted as SSE via sse.ts.
  *
  * Hash inputs:
  *   model, system, messages, tools, tool_choice, temperature, top_p,
@@ -53,9 +56,6 @@ export function isCacheable(req: AnthropicMessagesRequest): boolean {
 
   // Explicit opt-out wins over everything.
   if (meta?.fortune_no_cache === true) return false;
-  // Streaming requests aren't cached in this version. Synthesizing SSE
-  // from a buffered cached response is doable but deferred to phase 3.
-  if (req.stream === true) return false;
   // Tool-using calls aren't cached. Tool responses are tightly coupled
   // to the consumer's in-context state and replaying a stale tool_use
   // can break the downstream agent loop.

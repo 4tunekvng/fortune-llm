@@ -44,8 +44,11 @@ describe("isCacheable", () => {
     ).toBe(false);
   });
 
-  it("does NOT cache streaming requests", () => {
-    expect(isCacheable(baseReq({ temperature: 0, stream: true }))).toBe(false);
+  it("DOES cache streaming requests now (phase 2.5 stream-from-cache)", () => {
+    // We force non-stream upstream, cache the JSON, synthesize SSE on
+    // the way back. From isCacheable's perspective, stream:true is fine
+    // — the dispatcher handles the upstream-forcing.
+    expect(isCacheable(baseReq({ temperature: 0, stream: true }))).toBe(true);
   });
 
   it("does NOT cache tool-using requests (response is too in-context-sensitive)", () => {

@@ -12,13 +12,18 @@
     "secret:set:gemini": "wrangler secret put GEMINI_API_KEY",
     "secret:set:gemini:multi": "wrangler secret put GEMINI_API_KEYS",
     "secret:set:groq": "wrangler secret put GROQ_API_KEY",
+    "secret:set:cerebras": "wrangler secret put CEREBRAS_API_KEY",
     "secret:set:openrouter": "wrangler secret put OPENROUTER_API_KEY",
     "secret:set:anthropic": "wrangler secret put ANTHROPIC_API_KEY",
     "tail": "wrangler tail",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration:sdk": "node tests-integration/sdk-e2e.mjs",
+    "test:integration:curl": "bash tests-integration/curl-matrix.sh",
+    "test:integration": "npm run test:integration:sdk && npm run test:integration:curl"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
     "@cloudflare/workers-types": "^4.20260522.1",
     "typescript": "^5.7.2",
     "vitest": "^4.1.7",

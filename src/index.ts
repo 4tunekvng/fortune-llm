@@ -23,6 +23,7 @@ import {
   resolveGeminiKeys,
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
+import { callCerebras, DEFAULT_CEREBRAS_MODEL } from "./cerebras.js";
 import {
   callOpenRouter,
   DEFAULT_OPENROUTER_MODELS,
@@ -42,6 +43,8 @@ import {
   resolveCacheTtlSeconds,
   writeCache,
 } from "./cache.js";
+import { synthesizeAnthropicSSE } from "./sse.js";
+import { readStats, recordStats, type StatsEvent } from "./stats.js";
 import {
   checkRateLimit,
   getClientIp,
@@ -57,12 +60,15 @@ interface Env {
   GEMINI_API_KEYS?: string;
   /** Groq API key (https://console.groq.com/keys). Free tier with native tool use. */
   GROQ_API_KEY?: string;
+  /** Cerebras API key (https://cloud.cerebras.ai/platform). Free tier, very fast inference. */
+  CEREBRAS_API_KEY?: string;
   /** OpenRouter API key (https://openrouter.ai/keys). Free tier via :free models. */
   OPENROUTER_API_KEY?: string;
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
   DEFAULT_GROQ_MODEL?: string;
+  DEFAULT_CEREBRAS_MODEL?: string;
   /** Comma-separated OpenRouter model fallback list. Defaults to a hand-picked diverse list. */
   DEFAULT_OPENROUTER_MODELS?: string;
   // Per-backend circuit breaker, exact-match response cache, and per-IP
@@ -81,8 +87,42 @@ interface Env {
 let circuitMissingWarned = false;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    // Stats events accumulate over the lifetime of this request and are
+    // flushed to KV via ctx.waitUntil so they don't add latency.
+    const statsEvents: StatsEvent[] = [];
+    const flushStats = () => {
+      if (statsEvents.length > 0 && env.CIRCUIT) {
+        ctx.waitUntil(recordStats(statsEvents.slice(), env.CIRCUIT));
+        statsEvents.length = 0;
+      }
+    };
+
+    // /stats — observability for cost-down impact. Reports today's
+    // request count, cache hit ratio, per-tier success/fail counts, and
+    // rate-limit rejections. No auth on read (it's not sensitive).
+    if (request.method === "GET" && url.pathname === "/stats") {
+      const stats = await readStats(env.CIRCUIT);
+      const total = stats.totals.requests || 1;
+      const cacheTotal = stats.totals.cache_hits + stats.totals.cache_misses || 1;
+      return new Response(
+        JSON.stringify({
+          ...stats,
+          derived: {
+            cache_hit_rate: stats.totals.cache_hits / cacheTotal,
+            error_rate: stats.totals.errors / total,
+            rate_limited_rate: stats.totals.rate_limited / total,
+          },
+        }),
+        {
+          headers: {
+            "content-type": "application/json",
+            "access-control-allow-origin": "*",
+          },
+        },
+      );
+    }
 
     if (request.method === "GET" && url.pathname === "/healthz") {
       const geminiKeys = resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
@@ -93,6 +133,7 @@ export default {
           oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it",
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
           groq_model: env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
+          cerebras_model: env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL,
           openrouter_models: openRouterModels,
           backends: {
             "workers-ai": true, // bound by the AI binding, always available
@@ -101,6 +142,7 @@ export default {
             // is operational detail that needn't be visible to unauthenticated
             // callers scanning the public /healthz probe.
             groq: Boolean(env.GROQ_API_KEY),
+            cerebras: Boolean(env.CEREBRAS_API_KEY),
             openrouter: Boolean(env.OPENROUTER_API_KEY),
             // Do not expose whether a paid Anthropic key is configured to
             // unauthenticated callers — its presence is a billing secret.
@@ -133,6 +175,8 @@ export default {
       const ip = getClientIp(request);
       const decision = await checkRateLimit(ip, rateLimitPerMin, env.CIRCUIT);
       if (!decision.allowed) {
+        statsEvents.push({ kind: "request" }, { kind: "rate_limited" });
+        flushStats();
         return new Response(
           JSON.stringify({
             type: "error",
@@ -217,9 +261,19 @@ export default {
       return jsonError(400, "invalid_request_error", "Field 'max_tokens' must not exceed 65536.");
     }
 
+    // Past validation — this is a real /v1/messages request.
+    statsEvents.push({ kind: "request" });
+
     // Cache lookup: a hit short-circuits the entire chain. Saves the
     // full provider round-trip — biggest single quota multiplier on
     // top of the multi-provider chain itself.
+    //
+    // Streaming variant: cached entries are always stored as JSON
+    // (Anthropic message shape). When the consumer asked for `stream:
+    // true`, we synthesize SSE from the cached JSON via sse.ts. This
+    // way one cache entry serves both stream and non-stream callers
+    // for the same prompt.
+    const wantsStream = parsed.stream === true;
     const cacheTtl = resolveCacheTtlSeconds(env.CACHE_TTL_SECONDS);
     const cacheEligible = cacheTtl > 0 && isCacheable(parsed);
     let cacheKey: string | null = null;
@@ -227,19 +281,50 @@ export default {
       cacheKey = await computeCacheKey(parsed);
       const cached = await readCache(cacheKey, env.CIRCUIT);
       if (cached) {
-        return new Response(cached.body, {
-          status: 200,
-          headers: {
-            "content-type": "application/json",
-            "access-control-allow-origin": "*",
-            "x-fortune-llm-route": cached.tier,
-            "x-fortune-llm-model": cached.model,
-            "x-fortune-llm-cache": "hit",
-            "x-fortune-llm-cache-age-s": String(Math.floor((Date.now() - cached.cachedAt) / 1000)),
-          },
-        });
+        const cacheAge = Math.floor((Date.now() - cached.cachedAt) / 1000);
+        const diagnosticHeaders: Record<string, string> = {
+          "access-control-allow-origin": "*",
+          "x-fortune-llm-route": cached.tier,
+          "x-fortune-llm-model": cached.model,
+          "x-fortune-llm-cache": wantsStream ? "hit-stream" : "hit",
+          "x-fortune-llm-cache-age-s": String(cacheAge),
+        };
+        if (wantsStream) {
+          // Reconstruct message + emit as Anthropic SSE.
+          let msg;
+          try {
+            msg = JSON.parse(cached.body);
+          } catch {
+            msg = null;
+          }
+          if (msg && typeof msg === "object" && Array.isArray(msg.content)) {
+            const sseResp = synthesizeAnthropicSSE(msg);
+            const headers = new Headers(sseResp.headers);
+            for (const [k, v] of Object.entries(diagnosticHeaders)) headers.set(k, v);
+            statsEvents.push({ kind: "cache_hit" });
+            flushStats();
+            return new Response(sseResp.body, { status: 200, headers });
+          }
+          // Malformed cached entry — fall through to a fresh dispatch.
+        } else {
+          statsEvents.push({ kind: "cache_hit" });
+          flushStats();
+          return new Response(cached.body, {
+            status: 200,
+            headers: { "content-type": "application/json", ...diagnosticHeaders },
+          });
+        }
       }
     }
+
+    // Streaming + cacheable + cache miss: force the upstream call to
+    // non-streaming so we can buffer the full JSON, cache it, AND
+    // synthesize SSE back to the consumer. This is the entire reason
+    // stream-from-cache works — by canonicalizing on non-stream
+    // upstream, one cache entry serves both stream and non-stream
+    // callers indefinitely.
+    const effectiveParsed: AnthropicMessagesRequest =
+      cacheEligible && wantsStream ? { ...parsed, stream: false } : parsed;
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: Boolean(env.ANTHROPIC_API_KEY),
@@ -272,7 +357,7 @@ export default {
       }
 
       try {
-        const resp = await invokeTier(tier, env, parsed, request, rawBody);
+        const resp = await invokeTier(tier, env, effectiveParsed, request, rawBody);
         const headers = new Headers(resp.headers);
         headers.set("x-fortune-llm-route", tier);
         headers.set("x-fortune-llm-chain", chain.tiers.join(","));
@@ -290,8 +375,9 @@ export default {
         headers.set("access-control-expose-headers", EXPOSE_HEADERS);
 
         // Cache write: read the body so we can both store it and return
-        // it. Only cache 200 JSON responses (status is from invokeTier;
-        // we don't cache SSE streams or upstream errors).
+        // it. Only cache 200 JSON responses — SSE responses (which only
+        // appear when caching was ineligible, i.e. !cacheEligible) skip
+        // this branch and stream through normally.
         if (
           cacheEligible &&
           cacheKey &&
@@ -306,17 +392,36 @@ export default {
             cacheTtl,
             env.CIRCUIT,
           );
+          // If the consumer asked for a stream, synthesize SSE from
+          // the JSON we just received (we forced non-stream upstream).
+          if (wantsStream) {
+            const msg = JSON.parse(bodyText);
+            const sseResp = synthesizeAnthropicSSE(msg);
+            const sseHeaders = new Headers(sseResp.headers);
+            headers.forEach((v, k) => sseHeaders.set(k, v));
+            sseHeaders.set("content-type", "text/event-stream; charset=utf-8");
+            sseHeaders.set("x-fortune-llm-cache", "miss-stored-stream");
+            statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
+            flushStats();
+            return new Response(sseResp.body, { status: 200, headers: sseHeaders });
+          }
           headers.set("x-fortune-llm-cache", "miss-stored");
+          statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
+          flushStats();
           return new Response(bodyText, { status: 200, statusText: resp.statusText, headers });
         }
 
         if (cacheEligible) {
           headers.set("x-fortune-llm-cache", "miss-skip");
+          statsEvents.push({ kind: "cache_miss" });
         }
+        statsEvents.push({ kind: "tier_ok", tier });
+        flushStats();
         return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
       } catch (err) {
         const msg = errorMessage(err);
         errors.push({ tier, error: msg });
+        statsEvents.push({ kind: "tier_fail", tier });
         // Trip the circuit on quota / rate-limit signals so subsequent
         // requests skip this tier outright instead of repeatedly
         // burning a fetch on a guaranteed failure.
@@ -344,6 +449,9 @@ export default {
     if (skipped.length > 0) {
       (headers as Record<string, string>)["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
     }
+
+    statsEvents.push({ kind: "error" });
+    flushStats();
 
     if (skipped.length > 0 && errors.length === 0) {
       // Every tier in the chain had its circuit open — pure quota state.
@@ -429,6 +537,16 @@ async function invokeTier(
     }
     const model = env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
     const resp = await callGroq({ apiKey: env.GROQ_API_KEY, model }, parsed);
+    const headers = new Headers(resp.headers);
+    headers.set("x-fortune-llm-model", model);
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+  }
+  if (tier === "cerebras") {
+    if (!env.CEREBRAS_API_KEY) {
+      throw new Error("CEREBRAS_API_KEY not configured");
+    }
+    const model = env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL;
+    const resp = await callCerebras({ apiKey: env.CEREBRAS_API_KEY, model }, parsed);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
