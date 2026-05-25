@@ -64,6 +64,12 @@ function emptyStats(date: string): DailyStats {
 /**
  * Read the current day's stats. Returns an empty record if KV is
  * unavailable or no entry exists yet today.
+ *
+ * Note: Cloudflare KV reads are eventually-consistent, with a per-edge
+ * cache of up to 60s. The /stats endpoint can therefore be up to 60s
+ * stale. That's acceptable for observability — the data is correct,
+ * just lagged. Use Workers Analytics Engine or Durable Objects if real
+ * sub-second freshness is ever needed.
  */
 export async function readStats(
   kv: KVNamespace | undefined,
