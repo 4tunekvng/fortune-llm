@@ -500,6 +500,21 @@ export function streamWorkersAiAsAnthropic(
           if (done) {
             const tail = decoder.decode();
             if (tail) buffer += tail;
+            let cut: number;
+            while ((cut = buffer.indexOf("\n\n")) !== -1) {
+              const frame = buffer.slice(0, cut);
+              buffer = buffer.slice(cut + 2);
+              const payload = parseSseFrame(frame);
+              if (!payload || payload === "[DONE]") continue;
+              const delta = extractWorkersAiDelta(payload);
+              if (!delta) continue;
+              outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
+              writeEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: delta },
+              });
+            }
             if (buffer.trim()) {
               const payload = parseSseFrame(buffer.trim());
               if (payload && payload !== "[DONE]") {
@@ -513,7 +528,6 @@ export function streamWorkersAiAsAnthropic(
                   });
                 }
               }
-              buffer = "";
             }
             break;
           }
