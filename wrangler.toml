@@ -65,9 +65,21 @@ preview_id = "cf3be286c95c445a88e4bd54a27f5627"
 name = "STATS_DO"
 class_name = "StatsDO"
 
+# Response cache lives in its own DO actor so reads/writes serialize
+# through a single process — no KV eventual-consistency lag, no lost
+# updates. SQLite-backed under the hood, with a periodic alarm that
+# sweeps expired rows.
+[[durable_objects.bindings]]
+name = "CACHE_DO"
+class_name = "CacheDO"
+
 [[migrations]]
 tag = "v1-stats-do"
 new_sqlite_classes = ["StatsDO"]
+
+[[migrations]]
+tag = "v2-cache-do"
+new_sqlite_classes = ["CacheDO"]
 
 [observability]
 enabled = true

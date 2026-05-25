@@ -48,8 +48,10 @@ import {
 import { synthesizeAnthropicSSE } from "./sse.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
 import type { StatsEvent } from "./stats-do.js";
-// Re-export the DO class so the Workers runtime can find it.
+import type { CachedResponse } from "./cache-do.js";
+// Re-export the DO classes so the Workers runtime can find them.
 export { StatsDO } from "./stats-do.js";
+export { CacheDO } from "./cache-do.js";
 import {
   checkRateLimit,
   getRateLimitScope,
@@ -101,6 +103,13 @@ interface Env {
    * prod this binding is always present.
    */
   STATS_DO?: DurableObjectNamespace;
+  /**
+   * Durable Object that owns the response cache. Strongly consistent
+   * reads-after-writes — rapid-fire identical requests hit the cache
+   * immediately, unlike the prior KV-backed cache where the second
+   * read could miss for up to 60s of edge-cache propagation.
+   */
+  CACHE_DO?: DurableObjectNamespace;
 }
 
 let circuitMissingWarned = false;
@@ -325,10 +334,22 @@ export default {
     const wantsStream = parsed.stream === true;
     const cacheTtl = resolveCacheTtlSeconds(env.CACHE_TTL_SECONDS);
     const cacheEligible = cacheTtl > 0 && isCacheable(parsed);
+    // Cache lives in a DO actor — reads/writes are strongly consistent
+    // so rapid-fire identical requests hit cache immediately. When the
+    // CACHE_DO binding isn't present (local dev without the migration
+    // applied) we fall through to the KV cache for backward compat.
+    const cacheStub = env.CACHE_DO
+      ? (env.CACHE_DO.get(env.CACHE_DO.idFromName("cache-singleton")) as unknown as {
+          read(key: string): Promise<CachedResponse | null>;
+          write(key: string, entry: CachedResponse, ttlSeconds: number): Promise<void>;
+        })
+      : null;
     let cacheKey: string | null = null;
     if (cacheEligible) {
       cacheKey = await computeCacheKey(parsed);
-      const cached = await readCache(cacheKey, env.CIRCUIT);
+      const cached = cacheStub
+        ? await cacheStub.read(cacheKey)
+        : await readCache(cacheKey, env.CIRCUIT);
       if (cached) {
         const cacheAge = Math.floor((Date.now() - cached.cachedAt) / 1000);
         const diagnosticHeaders: Record<string, string> = {
@@ -435,12 +456,12 @@ export default {
         ) {
           const bodyText = await resp.text();
           const modelLabel = headers.get("x-fortune-llm-model") ?? tier;
-          await writeCache(
-            cacheKey,
-            { body: bodyText, tier, model: modelLabel, cachedAt: Date.now() },
-            cacheTtl,
-            env.CIRCUIT,
-          );
+          const cacheEntry = { body: bodyText, tier, model: modelLabel, cachedAt: Date.now() };
+          if (cacheStub) {
+            await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
+          } else {
+            await writeCache(cacheKey, cacheEntry, cacheTtl, env.CIRCUIT);
+          }
           // If the consumer asked for a stream, synthesize SSE from
           // the JSON we just received (we forced non-stream upstream).
           if (wantsStream) {
