@@ -102,7 +102,10 @@ export default {
     let rawBody = "";
     if (request.method !== "GET" && request.method !== "HEAD") {
       const clRaw = request.headers.get("content-length");
-      const contentLength = clRaw !== null ? parseInt(clRaw, 10) : NaN;
+      // Use Number() instead of parseInt() so scientific-notation values like
+      // "1e7" are parsed to their full numeric value (parseInt("1e7") === 1,
+      // defeating the fast-reject for any Content-Length expressed that way).
+      const contentLength = clRaw !== null ? Number(clRaw) : NaN;
       // Fast-reject on a declared oversized body before reading it.
       if (Number.isFinite(contentLength) && contentLength > 1_048_576) {
         return jsonError(413, "request_too_large", "Request body exceeds 1 MB limit");
