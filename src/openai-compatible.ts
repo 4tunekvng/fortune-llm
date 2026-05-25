@@ -35,6 +35,11 @@ import { buildWorkersAiInput } from "./workers-ai.js";
  * Static config for an OpenAI-compatible backend. The headers map gets
  * merged into the request — OpenRouter wants `HTTP-Referer` and
  * `X-Title`, GitHub Models wants an `api-version`, etc.
+ *
+ * `extraBody` is shallow-merged into the request JSON. Use it for
+ * provider-specific extensions like OpenRouter's `models: []` fallback
+ * list, `provider: {...}` routing preferences, or any other field the
+ * upstream supports that isn't in the canonical OpenAI shape.
  */
 export interface OpenAICompatibleConfig {
   /** Display label used in `model:` on the response and in errors. */
@@ -45,6 +50,8 @@ export interface OpenAICompatibleConfig {
   model: string;
   /** Optional extra headers (auth scheme is `Authorization: Bearer <key>` by default). */
   extraHeaders?: Record<string, string>;
+  /** Optional extra request-body fields (shallow-merged into the request JSON). */
+  extraBody?: Record<string, unknown>;
 }
 
 interface OpenAIChoice {
@@ -117,7 +124,11 @@ export async function callOpenAICompatible(
     (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
   const wantsStream = Boolean(body.stream) && !requireTools;
 
-  const httpBody = { ...body, model: config.model, stream: wantsStream };
+  // extraBody is shallow-merged AFTER model so provider-specific extensions
+  // (OpenRouter's `models: []`, `provider: {...}`) override or complement
+  // the canonical fields. Order matters: extraBody last lets a provider
+  // override stream/model if it really has to.
+  const httpBody = { ...body, model: config.model, stream: wantsStream, ...config.extraBody };
 
   const headers: Record<string, string> = {
     "content-type": "application/json",

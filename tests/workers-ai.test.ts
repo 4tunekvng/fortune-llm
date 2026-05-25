@@ -280,6 +280,57 @@ describe("workersAiToAnthropicMessage", () => {
     expect(msg.content).toHaveLength(1);
     expect(msg.content[0]).toEqual({ type: "text", text: "" });
   });
+
+  // Regression: gemma-4-26b returns OpenAI-compat shape. Without this
+  // path the translator emitted empty text + non-zero output_tokens.
+  it("handles the OpenAI-compat {choices[].message.content} shape (Gemma 4 et al)", () => {
+    const msg = workersAiToAnthropicMessage(
+      {
+        choices: [
+          {
+            message: { role: "assistant", content: "hello from gemma" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      },
+      "claude-sonnet-4-6",
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+    );
+    expect(msg.content).toEqual([{ type: "text", text: "hello from gemma" }]);
+    expect(msg.stop_reason).toBe("end_turn");
+    expect(msg.usage).toEqual({ input_tokens: 7, output_tokens: 3 });
+  });
+
+  it("extracts tool_calls from the OpenAI-compat choices shape", () => {
+    const msg = workersAiToAnthropicMessage(
+      {
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_42",
+                  type: "function",
+                  function: { name: "get_weather", arguments: JSON.stringify({ city: "Tokyo" }) },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 12, completion_tokens: 4 },
+      },
+      "claude-sonnet-4-6",
+      { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
+    );
+    expect(msg.stop_reason).toBe("tool_use");
+    expect(msg.content).toEqual([
+      { type: "tool_use", id: "call_42", name: "get_weather", input: { city: "Tokyo" } },
+    ]);
+  });
 });
 
 describe("extractWorkersAiDelta", () => {

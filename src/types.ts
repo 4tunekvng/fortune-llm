@@ -123,9 +123,29 @@ export interface OpenAIToolCall {
   };
 }
 
+/**
+ * Workers AI response — covers BOTH the legacy `{response, tool_calls}`
+ * shape (Llama 3.x, Mistral, older models) and the newer OpenAI-compat
+ * `{choices: [{message: {content, tool_calls}}]}` shape that Gemma 4 and
+ * other recently-added chat models return. The extractor downstream
+ * tries the legacy field first, then falls through to the choices array.
+ *
+ * Without this, gemma-4-26b returns `{choices: [...]}` with no top-level
+ * `response`, so the translator silently emitted empty text while still
+ * billing output tokens — visible to consumers as `end_turn` with
+ * `content: [{type:"text", text:""}]` and a non-zero output_tokens count.
+ */
 export interface WorkersAiChatResponse {
   response?: string;
   tool_calls?: OpenAIToolCall[];
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: OpenAIToolCall[];
+    };
+    finish_reason?: string;
+  }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;

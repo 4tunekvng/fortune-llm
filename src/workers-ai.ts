@@ -281,13 +281,41 @@ export async function callWorkersAi(
   });
 }
 
+/**
+ * Pull text + tool calls from a Workers AI response, regardless of which
+ * response shape the model uses. Newer models (Gemma 4 26B, GPT-OSS,
+ * Llama 4) return the OpenAI-compatible `{choices: [{message: {content,
+ * tool_calls}}]}` shape. Older models (Llama 3.x, Mistral, classic chat)
+ * return the simpler `{response, tool_calls}` shape. Both are valid;
+ * the gateway must handle either.
+ */
+export function extractWorkersAiContent(result: WorkersAiChatResponse): {
+  text: string;
+  toolCalls: OpenAIToolCall[];
+} {
+  // Legacy shape first — fast path for older models still in rotation.
+  const legacyText = typeof result.response === "string" ? result.response : "";
+  const legacyCalls = Array.isArray(result.tool_calls) ? result.tool_calls : [];
+  if (legacyText || legacyCalls.length > 0) {
+    return { text: legacyText, toolCalls: legacyCalls };
+  }
+  // Newer OpenAI-compatible shape — Gemma 4 and friends.
+  const msg = result.choices?.[0]?.message;
+  if (msg) {
+    return {
+      text: typeof msg.content === "string" ? msg.content : "",
+      toolCalls: Array.isArray(msg.tool_calls) ? msg.tool_calls : [],
+    };
+  }
+  return { text: "", toolCalls: [] };
+}
+
 export function workersAiToAnthropicMessage(
   result: WorkersAiChatResponse,
   modelLabel: string,
   input: WorkersAiChatRequest,
 ): AnthropicMessageResponse {
-  const text = typeof result.response === "string" ? result.response : "";
-  const toolCalls = Array.isArray(result.tool_calls) ? result.tool_calls : [];
+  const { text, toolCalls } = extractWorkersAiContent(result);
 
   const content: AnthropicResponseContentBlock[] = [];
   if (text) {
@@ -364,8 +392,7 @@ export function synthesizeToolStream(
   modelLabel: string,
 ): Response {
   const messageId = `msg_wa_${randomId()}`;
-  const text = typeof result.response === "string" ? result.response : "";
-  const toolCalls = Array.isArray(result.tool_calls) ? result.tool_calls : [];
+  const { text, toolCalls } = extractWorkersAiContent(result);
 
   const encoder = new TextEncoder();
   const downstream = new ReadableStream<Uint8Array>({

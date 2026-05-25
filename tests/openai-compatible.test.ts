@@ -185,6 +185,37 @@ describe("callOpenAICompatible", () => {
     expect(headers.authorization).toBe("Bearer or-key");
   });
 
+  it("merges extraBody into the request JSON (OpenRouter `models[]` + `provider.sort`)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    await callOpenAICompatible(
+      {
+        label: "OpenRouter",
+        url: "https://x",
+        apiKey: "k",
+        model: "primary:free",
+        extraBody: {
+          models: ["primary:free", "fallback1:free", "fallback2:free"],
+          provider: { sort: "throughput", allow_fallbacks: true },
+        },
+      },
+      baseReq(),
+    );
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.model).toBe("primary:free");
+    expect(body.models).toEqual(["primary:free", "fallback1:free", "fallback2:free"]);
+    expect(body.provider).toEqual({ sort: "throughput", allow_fallbacks: true });
+  });
+
   it("throws with the upstream status when the provider returns non-2xx", async () => {
     fetchSpy.mockResolvedValueOnce(new Response("rate limited", { status: 429 }));
     await expect(

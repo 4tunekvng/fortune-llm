@@ -23,7 +23,11 @@ import {
   resolveGeminiKeys,
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
-import { callOpenRouter, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
+import {
+  callOpenRouter,
+  DEFAULT_OPENROUTER_MODELS,
+  resolveOpenRouterModels,
+} from "./openrouter.js";
 import {
   getCircuitState,
   isQuotaError,
@@ -47,7 +51,8 @@ interface Env {
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
   DEFAULT_GROQ_MODEL?: string;
-  DEFAULT_OPENROUTER_MODEL?: string;
+  /** Comma-separated OpenRouter model fallback list. Defaults to a hand-picked diverse list. */
+  DEFAULT_OPENROUTER_MODELS?: string;
   // Per-backend circuit breaker. Optional: if unbound (e.g. local dev
   // without `wrangler kv namespace create CIRCUIT`), the breaker no-ops
   // and we fall through to the old retry-every-time behavior.
@@ -64,13 +69,14 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/healthz") {
       const geminiKeys = resolveGeminiKeys(env.GEMINI_API_KEYS, env.GEMINI_API_KEY);
+      const openRouterModels = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
       return new Response(
         JSON.stringify({
           ok: true,
           oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it",
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
           groq_model: env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
-          openrouter_model: env.DEFAULT_OPENROUTER_MODEL ?? DEFAULT_OPENROUTER_MODEL,
+          openrouter_models: openRouterModels,
           backends: {
             "workers-ai": true, // bound by the AI binding, always available
             gemini: geminiKeys.length > 0,
@@ -335,10 +341,13 @@ async function invokeTier(
     if (!env.OPENROUTER_API_KEY) {
       throw new Error("OPENROUTER_API_KEY not configured");
     }
-    const model = env.DEFAULT_OPENROUTER_MODEL ?? DEFAULT_OPENROUTER_MODEL;
-    const resp = await callOpenRouter({ apiKey: env.OPENROUTER_API_KEY, model }, parsed);
+    const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
+    const resp = await callOpenRouter({ apiKey: env.OPENROUTER_API_KEY, models }, parsed);
     const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
+    // The response includes the model OpenRouter actually picked; surface
+    // it as x-fortune-llm-model so consumers can see which fallback won.
+    headers.set("x-fortune-llm-model", models[0] as string);
+    headers.set("x-fortune-llm-openrouter-models", String(models.length));
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   // tier === "anthropic" — paid escape valve. Auto-appended when ANTHROPIC_API_KEY

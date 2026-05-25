@@ -9,7 +9,11 @@ compatibility_flags = ["nodejs_compat"]
 DEFAULT_OSS_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+# OpenRouter free models are heavily contested per-model; pass a list of
+# candidates and OpenRouter's `models: []` fallback picks the first
+# available. OpenRouter API caps the list at 3 entries — longer lists
+# truncate silently in code. Override per-deploy without code change.
+DEFAULT_OPENROUTER_MODELS = "deepseek/deepseek-v4-flash:free,openai/gpt-oss-120b:free,qwen/qwen3-coder:free"
 
 # Free-first chain with paid Anthropic as auto-last-resort. Each free
 # provider is an independent quota pool, so the more keys you have set,
