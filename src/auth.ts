@@ -62,5 +62,5 @@ function constantTimeEqual(a: string, b: string): boolean {
   if (aBuf.length !== bBuf.length) return false;
   // crypto.subtle.timingSafeEqual is a Cloudflare Workers runtime extension
   // that performs native constant-time comparison (not available in all JS runtimes).
-  return (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean }).timingSafeEqual(aBuf, bBuf);
+  return (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean }).timingSafeEqual(aBuf, bBuf);
 }
