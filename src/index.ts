@@ -150,7 +150,12 @@ export default {
     // /stats — observability for cost-down impact. Reads from the DO,
     // so the data is strongly consistent with all prior recordEvents
     // calls. No 60s KV edge-cache lag.
+    // Auth-protected: stats contain per-consumer names and traffic patterns.
     if (request.method === "GET" && url.pathname === "/stats") {
+      const statsAuth = authenticate(request, env.GATEWAY_TOKEN);
+      if (!statsAuth.ok) {
+        return jsonError(statsAuth.status, "authentication_error", statsAuth.message);
+      }
       const stub = getStatsStub();
       if (!stub) {
         return new Response(
