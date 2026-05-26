@@ -687,7 +687,7 @@ async function invokeTier(
     const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
     const resp = await callOpenRouter({ apiKey: resolved.key, models }, parsed);
     const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", models[0] as string);
+    headers.set("x-fortune-llm-model", models[0] ?? "unknown");
     headers.set("x-fortune-llm-openrouter-models", String(models.length));
     annotateByok(headers, resolved.source);
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
