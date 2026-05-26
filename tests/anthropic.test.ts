@@ -66,4 +66,33 @@ describe("scrubReservedMetadata", () => {
     const out = JSON.parse(scrubReservedMetadata(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
   });
+
+  it("strips fortune_cache so Anthropic does not reject it as an extra input", () => {
+    const body = JSON.stringify({
+      messages: [],
+      metadata: { fortune_cache: true, user_id: "u_123" },
+    });
+    const out = JSON.parse(scrubReservedMetadata(body));
+    expect(out.metadata).toEqual({ user_id: "u_123" });
+    expect(out.metadata).not.toHaveProperty("fortune_cache");
+  });
+
+  it("strips fortune_no_cache so Anthropic does not reject it as an extra input", () => {
+    const body = JSON.stringify({
+      messages: [],
+      metadata: { fortune_no_cache: true, user_id: "u_123" },
+    });
+    const out = JSON.parse(scrubReservedMetadata(body));
+    expect(out.metadata).toEqual({ user_id: "u_123" });
+    expect(out.metadata).not.toHaveProperty("fortune_no_cache");
+  });
+
+  it("drops metadata entirely when only fortune_cache and fortune_no_cache are present", () => {
+    const body = JSON.stringify({
+      messages: [],
+      metadata: { fortune_cache: true, fortune_no_cache: false },
+    });
+    const out = JSON.parse(scrubReservedMetadata(body));
+    expect("metadata" in out).toBe(false);
+  });
 });

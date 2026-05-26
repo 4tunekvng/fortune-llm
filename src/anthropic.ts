@@ -13,7 +13,12 @@ const UPSTREAM = "https://api.anthropic.com";
 // Metadata keys the gateway reserves for its own routing. Stripped from
 // the request body before it goes upstream so Anthropic doesn't reject
 // them as "Extra inputs are not permitted".
-const RESERVED_METADATA_KEYS = ["fortune_route", "fortune_require_tools"];
+const RESERVED_METADATA_KEYS = [
+  "fortune_route",
+  "fortune_require_tools",
+  "fortune_cache",
+  "fortune_no_cache",
+];
 
 export async function forwardToAnthropic(
   request: Request,
