@@ -425,12 +425,15 @@ export async function callGemini(
   const wantsStream = Boolean(req.stream) && !requireTools;
   const action = wantsStream ? "streamGenerateContent" : "generateContent";
   const url = `${GEMINI_API_BASE}/models/${encodeURIComponent(opts.model)}:${action}${
-    wantsStream ? "?alt=sse&" : "?"
-  }key=${encodeURIComponent(opts.apiKey)}`;
+    wantsStream ? "?alt=sse" : ""
+  }`;
 
   const upstream = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-goog-api-key": opts.apiKey,
+    },
     body: JSON.stringify(body),
   });
 
