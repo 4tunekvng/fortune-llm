@@ -357,7 +357,7 @@ export function workersAiToAnthropicMessage(
     result.usage?.completion_tokens ??
     Math.ceil(
       (text.length +
-        validToolCalls.reduce((acc, tc) => acc + tc.function.name.length + tc.function.arguments.length, 0)) /
+        validToolCalls.reduce((acc, tc) => acc + tc.function.name.length + (tc.function.arguments?.length ?? 0), 0)) /
         4,
     );
 
