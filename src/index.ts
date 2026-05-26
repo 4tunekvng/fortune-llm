@@ -123,6 +123,14 @@ export default {
     // through a single actor — no read-modify-write races, no KV cache
     // lag.
     const statsEvents: StatsEvent[] = [];
+    // Consumer identity comes from x-fortune-consumer (already
+    // sanitized by getRateLimitScope's CONSUMER_RE). For stats we
+    // accept whatever the consumer sent — the StatsDO normalizes
+    // again defensively and buckets invalid names as "unknown".
+    // Captured once at request entry so every stats event from this
+    // request lands in the same per-consumer bucket even if the
+    // header is removed/rewritten mid-flow.
+    const consumerHeader = request.headers.get("x-fortune-consumer");
     const getStatsStub = () =>
       env.STATS_DO ? env.STATS_DO.get(env.STATS_DO.idFromName("stats-singleton")) : null;
     const flushStats = () => {
@@ -130,7 +138,11 @@ export default {
       const stub = getStatsStub();
       if (stub) {
         const batch = statsEvents.slice();
-        ctx.waitUntil((stub as unknown as { recordEvents(e: StatsEvent[]): Promise<void> }).recordEvents(batch));
+        ctx.waitUntil(
+          (stub as unknown as {
+            recordEvents(e: StatsEvent[], consumer: string | null): Promise<void>;
+          }).recordEvents(batch, consumerHeader),
+        );
       }
       statsEvents.length = 0;
     };
@@ -150,6 +162,10 @@ export default {
         date: string;
         totals: { requests: number; cache_hits: number; cache_misses: number; rate_limited: number; errors: number };
         per_tier: Record<string, { ok: number; fail: number }>;
+        per_consumer: Record<string, {
+          totals: { requests: number; cache_hits: number; cache_misses: number; rate_limited: number; errors: number };
+          per_tier: Record<string, { ok: number; fail: number }>;
+        }>;
       }> }).getStats();
       const total = stats.totals.requests || 1;
       const cacheTotal = stats.totals.cache_hits + stats.totals.cache_misses || 1;
