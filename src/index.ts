@@ -486,7 +486,13 @@ export default {
           // If the consumer asked for a stream, synthesize SSE from
           // the JSON we just received (we forced non-stream upstream).
           if (wantsStream) {
-            const msg = JSON.parse(bodyText);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let msg: any;
+            try {
+              msg = JSON.parse(bodyText);
+            } catch {
+              return new Response("upstream returned non-JSON body", { status: 502 });
+            }
             const sseResp = synthesizeAnthropicSSE(msg);
             const sseHeaders = new Headers(sseResp.headers);
             headers.forEach((v, k) => sseHeaders.set(k, v));

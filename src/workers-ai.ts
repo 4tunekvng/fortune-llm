@@ -257,7 +257,11 @@ export async function callWorkersAi(
     const requireTools =
       (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
     if (requireTools) {
-      const calls = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
+      const calls = Array.isArray(raw.tool_calls)
+        ? raw.tool_calls
+        : Array.isArray(raw.choices?.[0]?.message?.tool_calls)
+          ? raw.choices[0].message.tool_calls
+          : [];
       if (calls.length === 0) {
         throw new Error(
           "Workers AI returned no tool calls though tools were declared and " +

@@ -107,10 +107,10 @@ export async function checkRateLimit(
   const now = Date.now();
   const minute = Math.floor(now / 60_000);
   const key = `${KEY_PREFIX}${scope}:${minute}`;
-  // Seconds left in this minute bucket. KV TTL minimum is 60s, so we
-  // bump the minimum to keep KV happy even at the very end of the
-  // window.
-  const secondsLeft = Math.max(60, 60 - Math.floor((now % 60_000) / 1000));
+  // KV TTL must be >= 60s (Cloudflare minimum). Retry-After reflects the
+  // actual seconds until the window rolls over (minimum 1).
+  const kvTtl = 60;
+  const secondsLeft = Math.max(1, 60 - Math.floor((now % 60_000) / 1000));
 
   let current = 0;
   try {
@@ -131,7 +131,7 @@ export async function checkRateLimit(
   }
 
   try {
-    await kv.put(key, String(next), { expirationTtl: secondsLeft });
+    await kv.put(key, String(next), { expirationTtl: kvTtl });
   } catch {
     // Write failure — count was incremented in spirit but not persisted.
     // Worst case: this single request slips past the limit. Acceptable.
