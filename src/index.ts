@@ -580,7 +580,7 @@ export default {
             type: "quota_exhausted",
             message: `all backends unavailable: ${[
               ...skipped.map((s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`),
-              ...errors.map((e) => `${e.tier} (error: ${e.error})`),
+              ...errors.map((e) => `${e.tier} (error: ${e.error.slice(0, 120)})`),
             ].join(", ")}`,
           },
         }),
@@ -592,7 +592,7 @@ export default {
       503,
       "all_backends_failed",
       `All free backends in chain [${chain.tiers.join(",")}] failed. ${errors
-        .map((e) => `${e.tier}: ${e.error}`)
+        .map((e) => `${e.tier}: ${e.error.slice(0, 120)}`)
         .join(" | ")}`,
     );
   },
