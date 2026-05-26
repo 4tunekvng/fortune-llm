@@ -491,7 +491,9 @@ export default {
             try {
               msg = JSON.parse(bodyText);
             } catch {
-              return new Response("upstream returned non-JSON body", { status: 502 });
+              statsEvents.push({ kind: "error" });
+              flushStats();
+              return jsonError(502, "upstream_error", `${tier} returned non-JSON body; cannot synthesize SSE stream`);
             }
             const sseResp = synthesizeAnthropicSSE(msg);
             const sseHeaders = new Headers(sseResp.headers);
