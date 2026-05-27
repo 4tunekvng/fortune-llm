@@ -116,8 +116,8 @@ export async function checkRateLimit(
   try {
     const raw = await kv.get(key);
     if (raw) {
-      const parsed = parseInt(raw, 10);
-      if (Number.isFinite(parsed)) current = parsed;
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) current = Math.floor(parsed);
     }
   } catch {
     // KV unavailable — fail open. Rate limit is best-effort; better to

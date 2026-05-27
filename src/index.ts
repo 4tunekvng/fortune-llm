@@ -397,6 +397,8 @@ export default {
             return new Response(sseResp.body, { status: 200, headers });
           }
           // Malformed cached entry — fall through to a fresh dispatch.
+          // Count it as a cache miss so stats remain accurate even on error paths.
+          statsEvents.push({ kind: "cache_miss" });
         } else {
           statsEvents.push({ kind: "cache_hit" });
           flushStats();

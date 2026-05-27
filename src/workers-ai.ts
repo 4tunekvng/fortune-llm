@@ -465,7 +465,7 @@ export function synthesizeToolStream(
         writeEvent("content_block_delta", {
           type: "content_block_delta",
           index: blockIndex,
-          delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+          delta: { type: "input_json_delta", partial_json: tc.function.arguments ?? "" },
         });
         writeEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
         blockIndex += 1;
