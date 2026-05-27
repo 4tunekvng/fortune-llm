@@ -479,25 +479,28 @@ export default {
         ) {
           const bodyText = await resp.text();
           const modelLabel = headers.get("x-fortune-llm-model") ?? tier;
+          // For stream requests: parse before caching so we never persist a
+          // non-JSON body. A parse failure returns 502 without touching cache,
+          // letting the next identical request try a fresh upstream call.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let streamMsg: any = undefined;
+          if (wantsStream) {
+            try {
+              streamMsg = JSON.parse(bodyText);
+            } catch {
+              statsEvents.push({ kind: "error" });
+              flushStats();
+              return jsonError(502, "upstream_error", `${tier} returned non-JSON body; cannot synthesize SSE stream`);
+            }
+          }
           const cacheEntry = { body: bodyText, tier, model: modelLabel, cachedAt: Date.now() };
           if (cacheStub) {
             await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
           } else {
             await writeCache(cacheKey, cacheEntry, cacheTtl, env.CIRCUIT);
           }
-          // If the consumer asked for a stream, synthesize SSE from
-          // the JSON we just received (we forced non-stream upstream).
           if (wantsStream) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            let msg: any;
-            try {
-              msg = JSON.parse(bodyText);
-            } catch {
-              statsEvents.push({ kind: "error" });
-              flushStats();
-              return jsonError(502, "upstream_error", `${tier} returned non-JSON body; cannot synthesize SSE stream`);
-            }
-            const sseResp = synthesizeAnthropicSSE(msg);
+            const sseResp = synthesizeAnthropicSSE(streamMsg);
             const sseHeaders = new Headers(sseResp.headers);
             headers.forEach((v, k) => sseHeaders.set(k, v));
             sseHeaders.set("content-type", "text/event-stream; charset=utf-8");
