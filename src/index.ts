@@ -534,7 +534,11 @@ export default {
         // circuit was already open at the top of this request loop, so the
         // final error message doesn't double-report the same tier.
         if (tier !== "anthropic" && isQuotaError(err)) {
-          await tripCircuit(tier, env.CIRCUIT, tripDurationMs, msg);
+          // A BYOK request exhausting the caller's own donated key must not
+          // disable this tier for all other users on the shared gateway pool.
+          if (!request.headers.get(`x-fortune-byok-${tier}`)) {
+            await tripCircuit(tier, env.CIRCUIT, tripDurationMs, msg);
+          }
         }
         // continue to next tier
       }
