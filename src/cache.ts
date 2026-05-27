@@ -154,9 +154,11 @@ export async function writeCache(
  * 30 days, floored at 60s (KV minimum).
  */
 export function resolveCacheTtlSeconds(envValue: string | undefined): number {
-  if (!envValue) return DEFAULT_CACHE_TTL_SECONDS;
+  if (envValue === undefined) return DEFAULT_CACHE_TTL_SECONDS;
   const n = Number(envValue);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_CACHE_TTL_SECONDS;
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_CACHE_TTL_SECONDS;
+  // Explicit 0 disables caching entirely (documented "Set to 0 to disable").
+  if (n === 0) return 0;
   const MAX = 30 * 24 * 60 * 60;
   return Math.min(Math.max(60, Math.floor(n)), MAX);
 }

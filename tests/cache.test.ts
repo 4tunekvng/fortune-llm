@@ -200,4 +200,8 @@ describe("resolveCacheTtlSeconds", () => {
   it("accepts a valid mid-range value", () => {
     expect(resolveCacheTtlSeconds("3600")).toBe(3600);
   });
+
+  it("returns 0 when env value is '0' — disables caching entirely", () => {
+    expect(resolveCacheTtlSeconds("0")).toBe(0);
+  });
 });
