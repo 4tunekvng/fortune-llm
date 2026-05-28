@@ -268,6 +268,8 @@ export default {
             headers: {
               "content-type": "application/json",
               "access-control-allow-origin": "*",
+              // Expose rate-limit diagnostic headers to cross-origin clients.
+              "access-control-expose-headers": EXPOSE_HEADERS,
               "retry-after": String(decision.retryAfterSeconds),
               "x-fortune-llm-rate-limit": `${decision.count}/${decision.limit}`,
               "x-fortune-llm-rate-scope": `${kind}:${scope}`,
@@ -752,7 +754,15 @@ function corsHeaders(): HeadersInit {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "x-api-key, anthropic-version, anthropic-beta, content-type, authorization",
+    // Include all custom request headers that cross-origin clients send so
+    // the preflight passes. Without x-fortune-consumer the browser blocks the
+    // per-consumer rate-limit header; without x-fortune-byok-* BYOK calls
+    // from browser apps always fail the preflight and never reach the Worker.
+    "access-control-allow-headers":
+      "x-api-key, anthropic-version, anthropic-beta, content-type, authorization, " +
+      "x-fortune-consumer, x-fortune-byok-anthropic, x-fortune-byok-groq, " +
+      "x-fortune-byok-cerebras, x-fortune-byok-gemini, x-fortune-byok-openrouter, " +
+      "x-fortune-byok-github-models, x-fortune-byok-mistral",
     "access-control-max-age": "86400",
     // Expose the diagnostic headers so cross-origin clients can read them.
     "access-control-expose-headers": EXPOSE_HEADERS,

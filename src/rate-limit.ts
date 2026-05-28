@@ -47,13 +47,19 @@ export interface RateLimitDecision {
  *   2. `x-forwarded-for` first hop.
  *   3. fallback string "unknown" so we don't crash if no IP is available.
  */
+/** Loose but safe IP pattern: allow IPv4, IPv6, and hex chars/colons/dots. */
+const IP_RE = /^[0-9a-fA-F.:]{2,45}$/;
+
 export function getClientIp(request: Request): string {
   const cfIp = request.headers.get("cf-connecting-ip");
   if (cfIp) return cfIp;
   const xff = request.headers.get("x-forwarded-for");
   if (xff) {
     const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    // Sanitize: reject strings that don't look like IP addresses so a
+    // crafted X-Forwarded-For header can't pollute KV key-space or
+    // bypass per-IP rate limiting by generating a fresh "IP" per request.
+    if (first && IP_RE.test(first)) return first;
   }
   return "unknown";
 }
