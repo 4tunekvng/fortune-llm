@@ -262,7 +262,7 @@ function translateMessageToGemini(m: AnthropicMessage, toolNameById: Map<string,
         if (block.text) parts.push({ text: block.text });
       } else if (block.type === "image") {
         const src = (block as { source?: unknown }).source as
-          | { type?: string; media_type?: string; data?: string }
+          | { type?: string; media_type?: string; data?: string; url?: string }
           | undefined;
         if (src && src.type === "base64" && typeof src.data === "string") {
           parts.push({
@@ -271,7 +271,17 @@ function translateMessageToGemini(m: AnthropicMessage, toolNameById: Map<string,
               data: src.data,
             },
           });
+        } else if (src && src.type === "url") {
+          // Gemini's inlineData only accepts base64-encoded bytes. URL-sourced
+          // images require the Gemini Files API (upload + fileUri), which this
+          // gateway does not implement. Throw so the dispatcher falls through to
+          // a backend that can handle arbitrary URL images (e.g. Anthropic).
+          throw new Error(
+            "Gemini does not support URL-sourced image blocks without the Files API. " +
+            "Use base64 encoding or route explicitly to Anthropic.",
+          );
         }
+        // Unknown source type — silently skip; upstream will likely fail on its own.
       } else if (block.type === "tool_use") {
         const tu = block as { name: string; input: unknown };
         const args =
