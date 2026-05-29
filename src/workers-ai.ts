@@ -260,7 +260,7 @@ export async function callWorkersAi(
       const calls = Array.isArray(raw.tool_calls)
         ? raw.tool_calls
         : Array.isArray(raw.choices?.[0]?.message?.tool_calls)
-          ? raw.choices[0].message.tool_calls
+          ? (raw.choices[0]?.message?.tool_calls ?? [])
           : [];
       if (calls.length === 0) {
         throw new Error(
@@ -351,7 +351,15 @@ export function workersAiToAnthropicMessage(
   }
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
-  const stopReason: AnthropicStopReason = validToolCalls.length > 0 ? "tool_use" : "end_turn";
+  const finishReason = result.choices?.[0]?.finish_reason;
+  let stopReason: AnthropicStopReason;
+  if (validToolCalls.length > 0) {
+    stopReason = "tool_use";
+  } else if (finishReason === "length") {
+    stopReason = "max_tokens";
+  } else {
+    stopReason = "end_turn";
+  }
   const promptTokens = result.usage?.prompt_tokens ?? estimatePromptTokens(input);
   const completionTokens =
     result.usage?.completion_tokens ??
