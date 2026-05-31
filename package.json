@@ -25,11 +25,11 @@
     "test:integration": "npm run test:integration:sdk && npm run test:integration:curl"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.98.0",
+    "@anthropic-ai/sdk": "^0.100.1",
     "@cloudflare/workers-types": "^4.20260522.1",
     "typescript": "^5.7.2",
     "vitest": "^4.1.7",
-    "wrangler": "^4.94.0",
+    "wrangler": "^4.95.0",
     "zod": "^4.4.3"
   },
   "engines": {
