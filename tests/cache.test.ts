@@ -90,7 +90,7 @@ describe("computeCacheKey", () => {
 
   it("differs when the model differs", async () => {
     const a = await computeCacheKey(baseReq({ temperature: 0, model: "claude-sonnet-4-6" }));
-    const b = await computeCacheKey(baseReq({ temperature: 0, model: "claude-opus-4-7" }));
+    const b = await computeCacheKey(baseReq({ temperature: 0, model: "claude-opus-4-8" }));
     expect(a).not.toBe(b);
   });
 
