@@ -4,7 +4,10 @@ node_modules/
 .dev.vars.*
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
+!**/.env.example
 dist/
 .DS_Store
 *.log
