@@ -3,14 +3,14 @@
  * tries each tier in order until one succeeds.
  *
  * Default policy (free first, paid as last-resort):
- *   - plain text chat        →  [groq, workers-ai, gemini, openrouter]
- *                                                     (four independent free-quota pools
+ *   - plain text chat        →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
+ *                                                     (seven independent free-quota pools
  *                                                      — exhausting all on the same day
  *                                                      is what makes the paid fallback rare)
- *   - has tools[]            →  [groq, workers-ai, gemini, openrouter]
- *                                                     (groq llama-3.3-70b has the best free
- *                                                      tool-use; gemma-4 / gemini / openrouter
- *                                                      are independent fallbacks)
+ *   - has tools[]            →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
+ *                                                     (groq llama-4-scout has the best free
+ *                                                      tool-use; cerebras/mistral/workers-ai/gemini/
+ *                                                      github-models/openrouter are independent fallbacks)
  *   - image content present  →  [gemini, openrouter]  (gemini is the best free vision; OpenRouter
  *                                                      has free Llama 4 vision as a safety net)
  *   - very long context      →  [gemini, openrouter, workers-ai]
