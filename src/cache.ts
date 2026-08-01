@@ -35,7 +35,7 @@ import type { AnthropicMessagesRequest } from "./types.js";
 export const DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60; // 24h
 const KEY_PREFIX = "cache:";
 
-export interface CachedResponse {
+interface CachedResponse {
   body: string;
   /** Tier that originally served this response (workers-ai, gemini, …). */
   tier: string;

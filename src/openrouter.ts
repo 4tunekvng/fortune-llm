@@ -46,7 +46,7 @@ export const DEFAULT_OPENROUTER_MODELS: readonly string[] = [
 ];
 
 /** OpenRouter's API rejects `models` arrays longer than this. */
-export const OPENROUTER_MAX_MODELS = 3;
+const OPENROUTER_MAX_MODELS = 3;
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 

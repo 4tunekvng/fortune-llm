@@ -23,7 +23,7 @@ import type { BackendKind } from "./route.js";
 
 export const DEFAULT_TRIP_DURATION_MS = 60 * 60 * 1000; // 1h
 
-export interface CircuitRecord {
+interface CircuitRecord {
   openedAt: number;
   until: number;
   reason: string;
