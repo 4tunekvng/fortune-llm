@@ -40,9 +40,11 @@ import { callOpenAICompatible } from "./openai-compatible.js";
  * truncate to the first three rather than erroring at the API.
  */
 export const DEFAULT_OPENROUTER_MODELS: readonly string[] = [
-  "deepseek/deepseek-v4-flash:free",
-  "openai/gpt-oss-120b:free",
-  "qwen/qwen3-coder:free",
+  // Re-picked 2026-10-28 from the live model list (free + tool support);
+  // the previous three stopped being free.
+  "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "thinkingmachines/inkling:free",
 ];
 
 /** OpenRouter's API rejects `models` arrays longer than this. */
