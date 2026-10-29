@@ -3,9 +3,9 @@
  * canonical OpenAI chat-completions shape, so this is a thin wrapper
  * over the shared adapter.
  *
- * Default model is `meta-llama/llama-4-scout-17b-16e-instruct` (Llama 4
- * Scout, 17B MoE) — chosen for the highest TPM allowance on Groq's free
- * Dev tier (30K TPM as of 2026-05-25) and native tool use.
+ * Default model is `openai/gpt-oss-120b`, a Groq production model with
+ * native tool use. Llama 4 Scout (the previous default, chosen for its 30K
+ * TPM) was retired by Groq and 404s as of 2026-10-28.
  *
  * Why TPM matters: under real chat load the 70B model trips its 12K TPM
  * limit within minutes, repeatedly opening Groq's circuit breaker and
@@ -17,7 +17,7 @@
  *   llama-3.1-8b-instant                          : 6K
  *   qwen/qwen3-32b                                : 6K
  *   llama-3.3-70b-versatile                       : 12K
- *   meta-llama/llama-4-scout-17b-16e-instruct     : 30K  ← current default
+ *   openai/gpt-oss-120b                           : current default
  *
  * Override via DEFAULT_GROQ_MODEL if you want a different quality/TPM tradeoff.
  */
@@ -25,7 +25,7 @@
 import type { AnthropicMessagesRequest } from "./types.js";
 import { callOpenAICompatible } from "./openai-compatible.js";
 
-export const DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 export interface CallGroqOptions {

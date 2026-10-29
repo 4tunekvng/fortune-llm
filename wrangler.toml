@@ -1,4 +1,7 @@
 name = "fortune-llm"
+# Fortune's personal-apps account (Northwestern login), pinned so deploys
+# never land in another account the logged-in user can see.
+account_id = "57fa999b5c361a16dc671fc8dc84e67a"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -8,7 +11,7 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 DEFAULT_OSS_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_CEREBRAS_MODEL = "gpt-oss-120b"
 DEFAULT_GITHUB_MODELS_MODEL = "openai/gpt-4o-mini"
 DEFAULT_MISTRAL_MODEL = "mistral-small-latest"
@@ -16,7 +19,7 @@ DEFAULT_MISTRAL_MODEL = "mistral-small-latest"
 # candidates and OpenRouter's `models: []` fallback picks the first
 # available. OpenRouter API caps the list at 3 entries — longer lists
 # truncate silently in code. Override per-deploy without code change.
-DEFAULT_OPENROUTER_MODELS = "deepseek/deepseek-v4-flash:free,openai/gpt-oss-120b:free,qwen/qwen3-coder:free"
+DEFAULT_OPENROUTER_MODELS = "google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free,thinkingmachines/inkling:free"
 
 # Free-first chain with paid Anthropic as auto-last-resort. Each free
 # provider is an independent quota pool, so the more keys you have set,
