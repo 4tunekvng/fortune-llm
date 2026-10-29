@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy -c wrangler.toml",
     "login": "wrangler login",
     "secret:set:token": "wrangler secret put GATEWAY_TOKEN",
     "secret:set:gemini": "wrangler secret put GEMINI_API_KEY",

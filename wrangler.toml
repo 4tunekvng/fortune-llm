@@ -1,4 +1,7 @@
 name = "fortune-llm"
+# Fortune's personal-apps account (Northwestern login), pinned so deploys
+# never land in another account the logged-in user can see.
+account_id = "57fa999b5c361a16dc671fc8dc84e67a"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
