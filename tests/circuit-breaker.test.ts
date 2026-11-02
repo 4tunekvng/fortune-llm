@@ -249,6 +249,15 @@ describe("tripDurationFor", () => {
     expect(tripDurationFor("429 TPM limit. Please try again in 20m", HOUR)).toBe(5 * 60 * 1000); // capped
   });
 
+  it("reads the window before billing links (Groq's per-minute 413)", () => {
+    expect(
+      tripDurationFor(
+        'Groq 413: {"error":{"message":"Request too large for model `openai/gpt-oss-120b` in organization `org_x` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 8936, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}',
+        HOUR,
+      ),
+    ).toBe(60 * 1000);
+  });
+
   it("gives a bare 429 two minutes", () => {
     expect(
       tripDurationFor('Mistral 429: {"object":"error","message":"Rate limit exceeded","type":"rate_limited","code":"1300"}', HOUR),

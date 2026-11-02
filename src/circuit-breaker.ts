@@ -163,11 +163,11 @@ export const AMBIGUOUS_TRIP_MS = 2 * 60 * 1000;
  */
 export function tripDurationFor(error: unknown, longMs: number): number {
   const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
-  const daily =
-    /per\s*-?\s*day|perday|daily|\brpd\b|tokens per day|payment|billing|credits|insufficient|neurons exhausted|neuron limit/.test(msg);
-  if (daily) return longMs;
+  // A stated window wins: Groq's per-minute 413 also links "settings/billing".
+  const perDay = /per\s*-?\s*day|perday|daily|\brpd\b|neurons exhausted|neuron limit/.test(msg);
   const short =
     /per\s*-?\s*(minute|second)|perminute|persecond|\b(tpm|rpm|rps)\b|try again in|retry\s*-?\s*(after|delay)|retrydelay/.test(msg);
+  if (perDay || (!short && /payment|billing|credits|insufficient/.test(msg))) return longMs;
   if (!short) return Math.min(longMs, AMBIGUOUS_TRIP_MS);
   // "9.5s", "1m30.5s", "20m", "47s", "350ms": sum each number by its unit.
   const m = /(?:try again in|retry\s*-?\s*(?:after|delay)\W*)\s*((?:\d+(?:\.\d+)?\s*(?:ms|h|m|s)?\s*)+)/.exec(msg);
