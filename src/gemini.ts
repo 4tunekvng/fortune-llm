@@ -30,7 +30,7 @@ import { getOutputSchemaObject } from "./structured-output.js";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 /** Tried in order after DEFAULT_GEMINI_MODEL's free quota is spent. */
-export const DEFAULT_GEMINI_FALLBACK_MODELS = "gemini-2.5-flash-lite";
+export const DEFAULT_GEMINI_FALLBACK_MODELS = "gemini-flash-lite-latest,gemini-flash-latest";
 
 export interface CallGeminiOptions {
   apiKey: string;
@@ -42,7 +42,7 @@ export interface CallGeminiOptions {
  * request, including tool declarations, image parts, and tool_use /
  * tool_result history.
  */
-export function buildGeminiInput(req: AnthropicMessagesRequest): GeminiGenerateRequest {
+export function buildGeminiInput(req: AnthropicMessagesRequest, model?: string): GeminiGenerateRequest {
   const systemParts: Array<{ text: string }> = [];
   if (typeof req.system === "string" && req.system) {
     systemParts.push({ text: req.system });
@@ -76,7 +76,9 @@ export function buildGeminiInput(req: AnthropicMessagesRequest): GeminiGenerateR
       // with stop_reason=max_tokens). Anthropic-style requests have no thinking
       // field; consumers expect the full max_tokens budget for the response.
       // Disable thinking so the gateway is a faithful proxy of max_tokens.
-      thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+      // thinkingBudget is a 2.5 setting: newer models (the -latest aliases)
+      // reject it with 400 "invalid argument", so they keep their default.
+      ...(!model || model.startsWith("gemini-2.5") ? { thinkingConfig: { thinkingBudget: 0, includeThoughts: false } } : {}),
       ...(typeof req.temperature === "number" ? { temperature: req.temperature } : {}),
       ...(typeof req.top_p === "number" ? { topP: req.top_p } : {}),
       ...(typeof req.top_k === "number" ? { topK: req.top_k } : {}),
@@ -407,9 +409,11 @@ export async function callGeminiWithRotation(
 
 /**
  * Gemini's free quotas are per model: gemini-2.5-flash allows 20 requests a
- * day (measured 2026-11-02), while flash-lite has its own, larger allowance.
- * Try each model in order (keys rotating within each); a quota error moves
- * to the next model, anything else is thrown at once. Only when every model
+ * day (measured 2026-11-02), while other models have their own allowance.
+ * Try each model in order (keys rotating within each); a quota error or a
+ * 404 (Google retires models per account: gemini-2.5-flash-lite answers
+ * "no longer available" on ours) moves to the next model, anything else is
+ * thrown at once. Only when every model
  * is spent does the last quota error reach the dispatcher and trip the tier.
  */
 export async function callGeminiModels(
@@ -418,16 +422,21 @@ export async function callGeminiModels(
   req: AnthropicMessagesRequest,
   isQuotaError: (err: unknown) => boolean,
 ): Promise<{ resp: Response; model: string }> {
+  // A quota error wins the final throw, so the tier's circuit trips only when
+  // a model was really out of quota, not when every model was just missing.
   let lastQuotaError: unknown = null;
+  let lastError: unknown = null;
   for (const model of models) {
     try {
       return { resp: await callGeminiWithRotation(keys, model, req, isQuotaError), model };
     } catch (err) {
-      if (!isQuotaError(err)) throw err;
-      lastQuotaError = err;
+      if (!isQuotaError(err) && !/Gemini 404/.test(err instanceof Error ? err.message : String(err))) throw err;
+      lastError = err;
+      if (isQuotaError(err)) lastQuotaError = err;
     }
   }
-  throw lastQuotaError instanceof Error ? lastQuotaError : new Error("All Gemini models exhausted (rate limit / quota)");
+  const final = lastQuotaError ?? lastError;
+  throw final instanceof Error ? final : new Error("No Gemini model configured");
 }
 
 /** The model list: the default first, then the fallbacks (comma-separated), no repeats. */
@@ -456,7 +465,7 @@ export async function callGemini(
   opts: CallGeminiOptions,
   req: AnthropicMessagesRequest,
 ): Promise<Response> {
-  const body = buildGeminiInput(req);
+  const body = buildGeminiInput(req, opts.model);
   // fortune_require_tools=true requires buffered (non-streaming) response so
   // we can inspect stop_reason before committing to a response. Force stream=false
   // in that case — mirrors the workers-ai path which already does this for all
