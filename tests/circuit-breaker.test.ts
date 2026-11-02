@@ -5,6 +5,7 @@ import {
   isQuotaError,
   resolveTripDurationMs,
   tripCircuit,
+  tripDurationFor,
 } from "../src/circuit-breaker.js";
 
 class FakeKv {
@@ -215,5 +216,46 @@ describe("end-to-end: trip then read", () => {
 
     vi.setSystemTime(new Date("2026-05-22T12:01:01Z"));
     expect((await getCircuitState("workers-ai", kv)).open).toBe(false);
+  });
+});
+
+describe("tripDurationFor", () => {
+  const HOUR = 60 * 60 * 1000;
+  // Real messages from the CIRCUIT records on 2026-11-02.
+  it("trips daily and billing limits for the full window", () => {
+    expect(
+      tripDurationFor(
+        'OpenRouter 429: {"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day"}}',
+        HOUR,
+      ),
+    ).toBe(HOUR);
+    expect(tripDurationFor('Cerebras 402: {"message":"Payment required to access this resource. Visit your billing tab."}', HOUR)).toBe(HOUR);
+    expect(tripDurationFor("Gemini 429 RESOURCE_EXHAUSTED quotaId GenerateRequestsPerDayPerProjectPerModel-FreeTier", HOUR)).toBe(HOUR);
+    expect(tripDurationFor("Workers AI: neurons exhausted for today", HOUR)).toBe(HOUR);
+  });
+
+  it("trips a per-minute limit only as long as the provider says", () => {
+    expect(
+      tripDurationFor(
+        "Groq 429: Rate limit reached for model openai/gpt-oss-120b on tokens per minute (TPM): Limit 8000, Used 6000, Requested 6500. Please try again in 9.5s.",
+        HOUR,
+      ),
+    ).toBe(30 * 1000); // 10.5s, floored at 30s
+    expect(
+      tripDurationFor('Gemini 429 RESOURCE_EXHAUSTED GenerateRequestsPerMinutePerProjectPerModel-FreeTier "retryDelay": "47s"', HOUR),
+    ).toBe(48 * 1000);
+    expect(tripDurationFor("Groq 429 tokens per minute (TPM). Please try again in 1m30.5s", HOUR)).toBe(91.5 * 1000);
+    expect(tripDurationFor("429 requests per minute exceeded", HOUR)).toBe(60 * 1000);
+    expect(tripDurationFor("429 TPM limit. Please try again in 20m", HOUR)).toBe(5 * 60 * 1000); // capped
+  });
+
+  it("gives a bare 429 two minutes", () => {
+    expect(
+      tripDurationFor('Mistral 429: {"object":"error","message":"Rate limit exceeded","type":"rate_limited","code":"1300"}', HOUR),
+    ).toBe(2 * 60 * 1000);
+  });
+
+  it("never exceeds the configured window", () => {
+    expect(tripDurationFor("Mistral 429 Rate limit exceeded", 60 * 1000)).toBe(60 * 1000);
   });
 });
