@@ -36,6 +36,7 @@ import {
   isQuotaError,
   resolveTripDurationMs,
   tripCircuit,
+  tripDurationFor,
   type CircuitState,
 } from "./circuit-breaker.js";
 import {
@@ -539,7 +540,7 @@ export default {
           // A BYOK request exhausting the caller's own donated key must not
           // disable this tier for all other users on the shared gateway pool.
           if (!request.headers.get(`x-fortune-byok-${tier}`)) {
-            await tripCircuit(tier, env.CIRCUIT, tripDurationMs, msg);
+            await tripCircuit(tier, env.CIRCUIT, tripDurationFor(msg, tripDurationMs), msg);
           }
         }
         // continue to next tier

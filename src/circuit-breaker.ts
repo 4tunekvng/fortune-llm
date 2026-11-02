@@ -21,7 +21,8 @@
  */
 import type { BackendKind } from "./route.js";
 
-export const DEFAULT_TRIP_DURATION_MS = 60 * 60 * 1000; // 1h
+const HOUR_MS = 60 * 60 * 1000;
+export const DEFAULT_TRIP_DURATION_MS = HOUR_MS; // 1h
 
 interface CircuitRecord {
   openedAt: number;
@@ -142,6 +143,42 @@ export async function tripCircuit(
     // KV write failures degrade silently — the next request will just
     // attempt the tier again, which is the same as today's behavior.
   }
+}
+
+/** Floor and ceiling for a short (per-second / per-minute) trip. */
+export const SHORT_TRIP_MIN_MS = 30 * 1000;
+export const SHORT_TRIP_MAX_MS = 5 * 60 * 1000;
+/** A bare 429 that doesn't say which window it hit. */
+export const AMBIGUOUS_TRIP_MS = 2 * 60 * 1000;
+
+/**
+ * How long to keep a tier's circuit open for this quota error. Every 429
+ * used to trip for the full window (1h): one burst past Mistral's 1 req/s,
+ * Groq's tokens-per-minute or Gemini's requests-per-minute took that free
+ * tier out for an hour and sent every app down the chain to the slow tiers.
+ * A daily or billing limit still trips for `longMs`; a per-second or
+ * per-minute limit trips only as long as the provider says it lasts
+ * ("try again in 2.3s", "retryDelay": "17s"), clamped to 30s-5min; a 429
+ * that doesn't say which window gets 2 minutes.
+ */
+export function tripDurationFor(error: unknown, longMs: number): number {
+  const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+  const daily =
+    /per\s*-?\s*day|perday|daily|\brpd\b|tokens per day|payment|billing|credits|insufficient|neurons exhausted|neuron limit/.test(msg);
+  if (daily) return longMs;
+  const short =
+    /per\s*-?\s*(minute|second)|perminute|persecond|\b(tpm|rpm|rps)\b|try again in|retry\s*-?\s*(after|delay)|retrydelay/.test(msg);
+  if (!short) return Math.min(longMs, AMBIGUOUS_TRIP_MS);
+  // "9.5s", "1m30.5s", "20m", "47s", "350ms": sum each number by its unit.
+  const m = /(?:try again in|retry\s*-?\s*(?:after|delay)\W*)\s*((?:\d+(?:\.\d+)?\s*(?:ms|h|m|s)?\s*)+)/.exec(msg);
+  let ms = 60 * 1000;
+  if (m) {
+    const unit = { ms: 1, s: 1000, m: 60 * 1000, h: HOUR_MS } as Record<string, number>;
+    let total = 0;
+    for (const [, n, u] of (m[1] ?? "").matchAll(/(\d+(?:\.\d+)?)\s*(ms|h|m|s)?/g)) total += Number(n) * (unit[u ?? "s"] ?? 1000);
+    if (total > 0) ms = total + 1000;
+  }
+  return Math.min(longMs, Math.max(SHORT_TRIP_MIN_MS, Math.min(SHORT_TRIP_MAX_MS, ms)));
 }
 
 /**
