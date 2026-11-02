@@ -744,6 +744,15 @@ describe("callGeminiModels", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("moves past a model Google has retired (404)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response('{"error":{"code":404,"message":"This model models/gemini-2.5-flash-lite is no longer available"}}', { status: 404 }),
+    );
+    fetchSpy.mockResolvedValueOnce(ok());
+    const { model } = await callGeminiModels(["k1"], ["gemini-2.5-flash-lite", "gemini-2.0-flash"], baseReq(), isQuotaError);
+    expect(model).toBe("gemini-2.0-flash");
+  });
+
   it("throws a non-quota error at once, without trying other models", async () => {
     fetchSpy.mockResolvedValueOnce(new Response("bad request", { status: 400 }));
     await expect(
@@ -763,7 +772,7 @@ describe("callGeminiModels", () => {
 
 describe("resolveGeminiModels", () => {
   it("puts the default first, then the fallbacks, without repeats", () => {
-    expect(resolveGeminiModels("gemini-2.5-flash", undefined)).toEqual(["gemini-2.5-flash", "gemini-2.5-flash-lite"]);
+    expect(resolveGeminiModels("gemini-2.5-flash", undefined)).toEqual(["gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-flash-latest"]);
     expect(resolveGeminiModels("gemini-2.5-flash", " gemini-2.5-flash , gemini-2.0-flash ")).toEqual(["gemini-2.5-flash", "gemini-2.0-flash"]);
     expect(resolveGeminiModels("gemini-2.5-flash", "")).toEqual(["gemini-2.5-flash"]);
   });
