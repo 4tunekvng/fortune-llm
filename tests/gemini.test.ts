@@ -9,6 +9,8 @@ import {
   streamGeminiAsAnthropic,
   resolveGeminiKeys,
   callGeminiWithRotation,
+  callGeminiModels,
+  resolveGeminiModels,
 } from "../src/gemini.js";
 import { isQuotaError } from "../src/circuit-breaker.js";
 import type { AnthropicMessagesRequest, GeminiResponse } from "../src/types.js";
@@ -699,5 +701,70 @@ describe("callGeminiWithRotation", () => {
       callGeminiWithRotation(["k1", "k2"], "gemini-2.5-flash", baseReq(), isQuotaError),
     ).rejects.toThrow(/RESOURCE_EXHAUSTED|429/);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("callGeminiModels", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fetchSpy: any;
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+  const ok = () =>
+    new Response(
+      JSON.stringify({
+        candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  // The real 429 from 2026-11-02, trimmed.
+  const dailyQuota = () =>
+    new Response(
+      '{"error":{"code":429,"message":"You exceeded your current quota. Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    );
+
+  it("moves to the next model when the first one's quota is spent", async () => {
+    fetchSpy.mockResolvedValueOnce(dailyQuota());
+    fetchSpy.mockResolvedValueOnce(ok());
+    const { resp, model } = await callGeminiModels(["k1"], ["gemini-2.5-flash", "gemini-2.5-flash-lite"], baseReq(), isQuotaError);
+    expect(resp.status).toBe(200);
+    expect(model).toBe("gemini-2.5-flash-lite");
+    expect(String(fetchSpy.mock.calls[1][0])).toContain("gemini-2.5-flash-lite");
+  });
+
+  it("uses the first model when it works", async () => {
+    fetchSpy.mockResolvedValueOnce(ok());
+    const { model } = await callGeminiModels(["k1"], ["gemini-2.5-flash", "gemini-2.5-flash-lite"], baseReq(), isQuotaError);
+    expect(model).toBe("gemini-2.5-flash");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws a non-quota error at once, without trying other models", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("bad request", { status: 400 }));
+    await expect(
+      callGeminiModels(["k1"], ["gemini-2.5-flash", "gemini-2.5-flash-lite"], baseReq(), isQuotaError),
+    ).rejects.toThrow(/Gemini 400/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows the quota error when every model is spent, so the tier trips", async () => {
+    fetchSpy.mockImplementation(async () => dailyQuota());
+    await expect(
+      callGeminiModels(["k1"], ["gemini-2.5-flash", "gemini-2.5-flash-lite"], baseReq(), isQuotaError),
+    ).rejects.toThrow(/429|RESOURCE_EXHAUSTED|quota/i);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("resolveGeminiModels", () => {
+  it("puts the default first, then the fallbacks, without repeats", () => {
+    expect(resolveGeminiModels("gemini-2.5-flash", undefined)).toEqual(["gemini-2.5-flash", "gemini-2.5-flash-lite"]);
+    expect(resolveGeminiModels("gemini-2.5-flash", " gemini-2.5-flash , gemini-2.0-flash ")).toEqual(["gemini-2.5-flash", "gemini-2.0-flash"]);
+    expect(resolveGeminiModels("gemini-2.5-flash", "")).toEqual(["gemini-2.5-flash"]);
   });
 });

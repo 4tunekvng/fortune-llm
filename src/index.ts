@@ -18,8 +18,10 @@ import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import {
-  callGeminiWithRotation,
+  callGeminiModels,
+  resolveGeminiModels,
   DEFAULT_GEMINI_MODEL,
+  DEFAULT_GEMINI_FALLBACK_MODELS,
   resolveGeminiKeys,
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
@@ -80,6 +82,8 @@ interface Env {
   GATEWAY_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
+  /** Comma-separated Gemini models tried after DEFAULT_GEMINI_MODEL's quota is spent. Default: gemini-2.5-flash-lite. */
+  GEMINI_FALLBACK_MODELS?: string;
   DEFAULT_GROQ_MODEL?: string;
   DEFAULT_CEREBRAS_MODEL?: string;
   DEFAULT_GITHUB_MODELS_MODEL?: string;
@@ -201,6 +205,7 @@ export default {
           ok: true,
           oss_model: env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it",
           gemini_model: env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
+          gemini_fallback_models: env.GEMINI_FALLBACK_MODELS ?? DEFAULT_GEMINI_FALLBACK_MODELS,
           groq_model: env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
           cerebras_model: env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL,
           github_models_model: env.DEFAULT_GITHUB_MODELS_MODEL ?? DEFAULT_GITHUB_MODELS_MODEL,
@@ -647,8 +652,8 @@ async function invokeTier(
     if (keys.length === 0) {
       throw new Error("GEMINI_API_KEY not configured");
     }
-    const model = env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
-    const resp = await callGeminiWithRotation(keys, model, parsed, isQuotaError);
+    const models = resolveGeminiModels(env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL, env.GEMINI_FALLBACK_MODELS);
+    const { resp, model } = await callGeminiModels(keys, models, parsed, isQuotaError);
     const headers = new Headers(resp.headers);
     headers.set("x-fortune-llm-model", model);
     if (keys.length > 1) headers.set("x-fortune-llm-gemini-keys", String(keys.length));
