@@ -29,6 +29,8 @@ import { getOutputSchemaObject } from "./structured-output.js";
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+/** Tried in order after DEFAULT_GEMINI_MODEL's free quota is spent. */
+export const DEFAULT_GEMINI_FALLBACK_MODELS = "gemini-2.5-flash-lite";
 
 export interface CallGeminiOptions {
   apiKey: string;
@@ -401,6 +403,37 @@ export async function callGeminiWithRotation(
   throw lastQuotaError instanceof Error
     ? lastQuotaError
     : new Error("All Gemini keys exhausted (rate limit / quota)");
+}
+
+/**
+ * Gemini's free quotas are per model: gemini-2.5-flash allows 20 requests a
+ * day (measured 2026-11-02), while flash-lite has its own, larger allowance.
+ * Try each model in order (keys rotating within each); a quota error moves
+ * to the next model, anything else is thrown at once. Only when every model
+ * is spent does the last quota error reach the dispatcher and trip the tier.
+ */
+export async function callGeminiModels(
+  keys: string[],
+  models: string[],
+  req: AnthropicMessagesRequest,
+  isQuotaError: (err: unknown) => boolean,
+): Promise<{ resp: Response; model: string }> {
+  let lastQuotaError: unknown = null;
+  for (const model of models) {
+    try {
+      return { resp: await callGeminiWithRotation(keys, model, req, isQuotaError), model };
+    } catch (err) {
+      if (!isQuotaError(err)) throw err;
+      lastQuotaError = err;
+    }
+  }
+  throw lastQuotaError instanceof Error ? lastQuotaError : new Error("All Gemini models exhausted (rate limit / quota)");
+}
+
+/** The model list: the default first, then the fallbacks (comma-separated), no repeats. */
+export function resolveGeminiModels(primary: string, fallbacks: string | undefined): string[] {
+  const rest = (fallbacks ?? DEFAULT_GEMINI_FALLBACK_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
+  return [...new Set([primary, ...rest])];
 }
 
 function shuffleKeys<T>(arr: T[]): T[] {
