@@ -69,33 +69,41 @@ export class CacheDO extends DurableObject {
   }
 
   /**
-   * Look up a cached response by key. Returns null if missing or
-   * expired. Expired rows are NOT cleaned up here — that happens in
-   * the alarm sweep — but they're invisible to readers.
+   * Look up a cached response by key. Returns null if missing,
+   * expired, or on any storage error — never throws, matching the
+   * KV-backed readCache contract so the caller degrades to a cache
+   * miss rather than a 500 on transient storage faults.
    */
   async read(key: string): Promise<CachedResponse | null> {
-    const now = Date.now();
-    const row = this.ctx.storage.sql
-      .exec<{ body: string; tier: string; model: string; cached_at: number; expires_at: number }>(
-        "SELECT body, tier, model, cached_at, expires_at FROM cache_entries WHERE cache_key = ? AND expires_at > ?",
-        key,
-        now,
-      )
-      .toArray()[0];
-    if (!row) return null;
-    return { body: row.body, tier: row.tier, model: row.model, cachedAt: row.cached_at };
+    try {
+      const now = Date.now();
+      const row = this.ctx.storage.sql
+        .exec<{ body: string; tier: string; model: string; cached_at: number; expires_at: number }>(
+          "SELECT body, tier, model, cached_at, expires_at FROM cache_entries WHERE cache_key = ? AND expires_at > ?",
+          key,
+          now,
+        )
+        .toArray()[0];
+      if (!row) return null;
+      return { body: row.body, tier: row.tier, model: row.model, cachedAt: row.cached_at };
+    } catch {
+      return null;
+    }
   }
 
   /**
    * Store a response. INSERT OR REPLACE so a re-cache (e.g. user
    * forced a fresh dispatch via fortune_no_cache then we ran a
    * subsequent fresh call) just overwrites the prior entry.
+   * Swallows storage errors — matching the KV-backed writeCache
+   * contract so the upstream response is never lost on a write fault.
    */
   async write(
     key: string,
     entry: CachedResponse,
     ttlSeconds: number,
   ): Promise<void> {
+    try {
     const now = Date.now();
     const expiresAt = now + Math.max(60, Math.floor(ttlSeconds)) * 1000;
     this.ctx.storage.sql.exec(
@@ -109,6 +117,9 @@ export class CacheDO extends DurableObject {
       entry.cachedAt,
       expiresAt,
     );
+    } catch {
+      // ignore write failures — the upstream response is already returned
+    }
   }
 
   /** Periodic sweep — drop everything that's expired. */
