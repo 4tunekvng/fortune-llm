@@ -59,19 +59,20 @@ function constantTimeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder();
   const aBuf = enc.encode(a);
   const bBuf = enc.encode(b);
-  // Pad the shorter buffer to match the longer so that timingSafeEqual (which
-  // requires equal-length inputs) can always run.  Comparing over the max
-  // length avoids an early-return branch that would otherwise leak the byte-
-  // length of the expected token to a timing attacker.
+  // Pad to max content length + 4 bytes for a length tag, so that a single
+  // timingSafeEqual covers both content and length without any &&
+  // short-circuit that could leak whether the byte comparison passed.
   const len = Math.max(aBuf.length, bBuf.length);
-  const aPad = new Uint8Array(len);
-  const bPad = new Uint8Array(len);
+  const aPad = new Uint8Array(len + 4);
+  const bPad = new Uint8Array(len + 4);
   aPad.set(aBuf);
   bPad.set(bBuf);
+  // Write actual lengths into the last 4 bytes; differing lengths produce
+  // differing tags and the comparison fails even when content bytes match.
+  new DataView(aPad.buffer).setUint32(len, aBuf.length, false);
+  new DataView(bPad.buffer).setUint32(len, bBuf.length, false);
   // crypto.subtle.timingSafeEqual is a Cloudflare Workers runtime extension.
-  const equal = (crypto.subtle as unknown as { timingSafeEqual(a: ArrayBufferView, b: ArrayBufferView): boolean }).timingSafeEqual(aPad, bPad);
-  // Even if the padded comparison passes (impossible when lengths differ, since
-  // the padding zeros will mismatch the non-zero content), enforce length equality
-  // so an attacker cannot craft a prefix that satisfies the byte comparison.
-  return equal && aBuf.length === bBuf.length;
+  return (crypto.subtle as unknown as {
+    timingSafeEqual(a: ArrayBufferView, b: ArrayBufferView): boolean;
+  }).timingSafeEqual(aPad, bPad);
 }
