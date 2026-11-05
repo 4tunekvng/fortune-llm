@@ -56,7 +56,7 @@ describe("flattenContent", () => {
 describe("buildWorkersAiInput", () => {
   it("prefixes a system message when system is a string", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 100,
       system: "you are helpful",
       messages: [{ role: "user", content: "hi" }],
@@ -67,7 +67,7 @@ describe("buildWorkersAiInput", () => {
 
   it("flattens system content blocks", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 100,
       system: [
         { type: "text", text: "line1" },
@@ -80,7 +80,7 @@ describe("buildWorkersAiInput", () => {
 
   it("forwards stream + sampling params", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
       temperature: 0.7,
@@ -99,7 +99,7 @@ describe("buildWorkersAiInput", () => {
 
   it("forwards stop_sequences as the OpenAI stop field", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
       stop_sequences: ["<END>", "\n\nHuman:"],
@@ -109,7 +109,7 @@ describe("buildWorkersAiInput", () => {
 
   it("omits stop when stop_sequences is empty", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
       stop_sequences: [],
@@ -119,7 +119,7 @@ describe("buildWorkersAiInput", () => {
 
   it("clamps non-finite max_tokens to a sane default", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: Number.NaN,
       messages: [{ role: "user", content: "hi" }],
     });
@@ -128,7 +128,7 @@ describe("buildWorkersAiInput", () => {
 
   it("translates Anthropic tool_use blocks on an assistant turn to OpenAI tool_calls", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 100,
       messages: [
         { role: "user", content: "search the web for cats" },
@@ -167,7 +167,7 @@ describe("buildWorkersAiInput", () => {
 
   it("translates request-level tools[] declarations", () => {
     const input = buildWorkersAiInput({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       max_tokens: 100,
       messages: [{ role: "user", content: "hi" }],
       tools: [
@@ -227,12 +227,12 @@ describe("workersAiToAnthropicMessage", () => {
   it("wraps text response in an Anthropic Message shape", () => {
     const msg = workersAiToAnthropicMessage(
       { response: "hello world", usage: { prompt_tokens: 5, completion_tokens: 2 } },
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
     );
     expect(msg.type).toBe("message");
     expect(msg.role).toBe("assistant");
-    expect(msg.model).toBe("claude-sonnet-4-6");
+    expect(msg.model).toBe("claude-sonnet-5");
     expect(msg.content).toEqual([{ type: "text", text: "hello world" }]);
     expect(msg.stop_reason).toBe("end_turn");
     expect(msg.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
@@ -251,7 +251,7 @@ describe("workersAiToAnthropicMessage", () => {
         ],
         usage: { prompt_tokens: 10, completion_tokens: 5 },
       },
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
     );
     expect(msg.stop_reason).toBe("tool_use");
@@ -264,7 +264,7 @@ describe("workersAiToAnthropicMessage", () => {
   it("estimates tokens when Workers AI omits usage", () => {
     const msg = workersAiToAnthropicMessage(
       { response: "abcd".repeat(10) },
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "x".repeat(20) }], max_tokens: 100 },
     );
     expect(msg.usage.input_tokens).toBeGreaterThan(0);
@@ -274,7 +274,7 @@ describe("workersAiToAnthropicMessage", () => {
   it("ensures at least one content block even for empty Workers AI responses", () => {
     const msg = workersAiToAnthropicMessage(
       {},
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
     );
     expect(msg.content).toHaveLength(1);
@@ -294,7 +294,7 @@ describe("workersAiToAnthropicMessage", () => {
         ],
         usage: { prompt_tokens: 7, completion_tokens: 3 },
       },
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
     );
     expect(msg.content).toEqual([{ type: "text", text: "hello from gemma" }]);
@@ -323,7 +323,7 @@ describe("workersAiToAnthropicMessage", () => {
         ],
         usage: { prompt_tokens: 12, completion_tokens: 4 },
       },
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
     );
     expect(msg.stop_reason).toBe("tool_use");
