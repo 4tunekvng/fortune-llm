@@ -665,6 +665,12 @@ export function streamGeminiAsAnthropic(
           if (done) {
             const tail = decoder.decode();
             if (tail) buffer += tail;
+            let cut: number;
+            while ((cut = buffer.indexOf("\n\n")) !== -1) {
+              const frame = buffer.slice(0, cut);
+              buffer = buffer.slice(cut + 2);
+              processFrame(frame);
+            }
             if (buffer.trim()) processFrame(buffer.trim());
             buffer = "";
             break;
