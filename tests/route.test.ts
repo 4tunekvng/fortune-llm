@@ -235,4 +235,21 @@ describe("estimateInputTokens", () => {
     );
     expect(n).toBe(11); // ceil((40 + 1) / 4)
   });
+
+  it("counts image blocks as the 200-char fallback (50 tokens each)", () => {
+    const n = estimateInputTokens(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "x" } },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "x" } },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(n).toBe(100); // 2 images × 200 chars / 4 = 100 tokens
+  });
 });
