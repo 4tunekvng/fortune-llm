@@ -22,6 +22,7 @@ import type {
   AnthropicMessageResponse,
   AnthropicMessage,
   AnthropicContentBlock,
+  AnthropicImageSource,
   AnthropicResponseContentBlock,
   AnthropicStopReason,
   AnthropicTool,
@@ -29,6 +30,7 @@ import type {
   OpenAIToolCall,
   WorkersAiChatRequest,
   WorkersAiChatMessage,
+  WorkersAiContentBlock,
   WorkersAiChatResponse,
 } from "./types.js";
 import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./structured-output.js";
@@ -161,6 +163,8 @@ export function buildWorkersAiInput(req: AnthropicMessagesRequest): WorkersAiCha
  *     `content` set to the text and `tool_calls` set from the tool_use blocks
  *   - user with tool_result blocks → one `role: "tool"` message per result,
  *     plus an optional `role: "user"` message for any plain text alongside
+ *   - user with image blocks → content becomes a WorkersAiContentBlock[]
+ *     array (OpenAI vision format) so Gemma 4 can process the image
  */
 function translateMessage(m: AnthropicMessage): WorkersAiChatMessage[] {
   if (typeof m.content === "string") {
@@ -169,12 +173,25 @@ function translateMessage(m: AnthropicMessage): WorkersAiChatMessage[] {
 
   const out: WorkersAiChatMessage[] = [];
   const textBuf: string[] = [];
+  const imageBuf: WorkersAiContentBlock[] = [];
   const toolCalls: OpenAIToolCall[] = [];
   const toolMessages: WorkersAiChatMessage[] = [];
 
   for (const block of m.content) {
     if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
       textBuf.push((block as { text: string }).text);
+    } else if (block.type === "image" && m.role === "user") {
+      const src = (block as { source: AnthropicImageSource }).source;
+      let url: string;
+      if (src.type === "base64" && src.data) {
+        url = `data:${src.media_type ?? "image/jpeg"};base64,${src.data}`;
+      } else if ((src.type === "url" || src.type === "image_url") && src.url) {
+        url = src.url;
+      } else {
+        // Unrecognised source shape — skip to avoid a broken request.
+        continue;
+      }
+      imageBuf.push({ type: "image_url", image_url: { url } });
     } else if (block.type === "tool_use" && m.role === "assistant") {
       const tu = block as { id: string; name: string; input: unknown };
       toolCalls.push({
@@ -220,7 +237,15 @@ function translateMessage(m: AnthropicMessage): WorkersAiChatMessage[] {
       });
     }
   } else {
-    if (textJoined) {
+    // User messages with images use the multi-part content array (OpenAI
+    // vision format). Pure-text messages stay as a plain string so non-
+    // vision models are unaffected.
+    if (imageBuf.length > 0) {
+      const parts: WorkersAiContentBlock[] = [];
+      if (textJoined) parts.push({ type: "text", text: textJoined });
+      parts.push(...imageBuf);
+      out.push({ role: "user", content: parts });
+    } else if (textJoined) {
       out.push({ role: "user", content: textJoined });
     }
     out.push(...toolMessages);

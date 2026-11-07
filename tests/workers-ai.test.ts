@@ -346,3 +346,78 @@ describe("extractWorkersAiDelta", () => {
     expect(extractWorkersAiDelta('{"response": 42}')).toBe(null);
   });
 });
+
+describe("buildWorkersAiInput — image block translation", () => {
+  it("translates base64 image blocks to OpenAI data-URL vision format", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe this" },
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: "abc123",
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const built = buildWorkersAiInput(req);
+    expect(built.messages).toHaveLength(1);
+    const msg = built.messages[0];
+    expect(Array.isArray(msg.content)).toBe(true);
+    const parts = msg.content as Array<{ type: string; text?: string;
+      image_url?: { url: string } }>;
+    expect(parts[0]).toEqual({ type: "text", text: "describe this" });
+    expect(parts[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,abc123" },
+    });
+  });
+
+  it("translates URL image sources as a plain image_url reference", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://example.com/photo.jpg",
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const built = buildWorkersAiInput(req);
+    const parts = built.messages[0].content as Array<{
+      type: string; image_url?: { url: string } }>;
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toEqual({
+      type: "image_url",
+      image_url: { url: "https://example.com/photo.jpg" },
+    });
+  });
+
+  it("produces a plain string for text-only user messages (no regression)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const built = buildWorkersAiInput(req);
+    expect(typeof built.messages[0].content).toBe("string");
+  });
+});

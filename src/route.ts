@@ -11,8 +11,12 @@
  *                                                     (groq llama-4-scout has the best free
  *                                                      tool-use; cerebras/mistral/workers-ai/gemini/
  *                                                      github-models/openrouter are independent fallbacks)
- *   - image content present  →  [gemini, openrouter]  (gemini is the best free vision; OpenRouter
- *                                                      has free Llama 4 vision as a safety net)
+ *   - image content present  →  [gemini, openrouter, workers-ai]
+ *                                                     (gemini is best free vision; OpenRouter
+ *                                                      Llama 4 is next; Gemma 4 26B on Workers AI
+ *                                                      is the third free tier — image blocks are
+ *                                                      now translated to data-URL / URL in
+ *                                                      workers-ai.ts)
  *   - very long context      →  [gemini, openrouter, workers-ai]
  *                                                     (gemini 2.5 flash has 1M+ context;
  *                                                      OpenRouter's free Llama 4 has 256k+;
@@ -155,9 +159,10 @@ function hasOutputConfig(req: AnthropicMessagesRequest): boolean {
 function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   if (containsImage(req)) {
     // Gemini is the strongest free vision model; OpenRouter's free Llama 4
-    // is the backup. Workers AI Gemma 4 supports vision but image-block
-    // translation isn't implemented in workers-ai.ts yet.
-    return ["gemini", "openrouter"];
+    // is next; Workers AI Gemma 4 26B is the third free-tier option now that
+    // image-block translation (base64 → data-URL, URL pass-through) is
+    // implemented in workers-ai.ts.
+    return ["gemini", "openrouter", "workers-ai"];
   }
 
   const approxTokens = estimateInputTokens(req);

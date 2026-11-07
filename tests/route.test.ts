@@ -21,7 +21,7 @@ const DEFAULT_FREE_CHAIN = [
   "openrouter",
 ] as const;
 const LONG_CONTEXT_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
-const VISION_FREE_CHAIN = ["gemini", "openrouter"] as const;
+const VISION_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
 
 describe("decideRoute", () => {
   it("defaults to the multi-provider free chain for plain text chat", () => {

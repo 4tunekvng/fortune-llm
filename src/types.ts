@@ -108,9 +108,14 @@ export interface WorkersAiChatRequest {
   };
 }
 
+/** OpenAI-style vision content block (text or image_url). */
+export type WorkersAiContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface WorkersAiChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | WorkersAiContentBlock[];
   tool_call_id?: string;
   tool_calls?: OpenAIToolCall[];
 }
