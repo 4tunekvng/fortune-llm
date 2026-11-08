@@ -607,6 +607,7 @@ async function runChain(
       };
     } catch (err) {
       const msg = errorMessage(err);
+      console.error(`fortune-llm: tier ${tier} failed:`, msg);
       errors.push({ tier, error: msg });
       statsEvents.push({ kind: "tier_fail", tier });
       // Trip the circuit on quota / rate-limit signals so subsequent
@@ -689,9 +690,7 @@ function chainExhaustedResponse(
               (s) =>
                 `${s.tier} (open until ${new Date(s.until).toISOString()})`,
             ),
-            ...errors.map(
-              (e) => `${e.tier} (error: ${e.error.slice(0, 120)})`,
-            ),
+            ...errors.map((e) => `${e.tier} (failed)`),
           ].join(", ")}`,
         },
       }),
@@ -702,9 +701,9 @@ function chainExhaustedResponse(
   return jsonError(
     503,
     "all_backends_failed",
-    `All free backends in chain [${chain.tiers.join(",")}] failed. ${errors
-      .map((e) => `${e.tier}: ${e.error.slice(0, 120)}`)
-      .join(" | ")}`,
+    `All free backends in chain [${chain.tiers.join(",")}] failed: ${errors
+      .map((e) => e.tier)
+      .join(", ")}.`,
   );
 }
 
@@ -795,10 +794,11 @@ export default {
           await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
         );
       } catch (err) {
+        console.error("fortune-llm: Anthropic upstream failed:", errorMessage(err));
         return jsonError(
           502,
           "upstream_error",
-          `Anthropic upstream failed: ${errorMessage(err)}`,
+          "Anthropic upstream failed. Please try again.",
         );
       }
     }
