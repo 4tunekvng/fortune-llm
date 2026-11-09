@@ -371,7 +371,7 @@ describe("buildWorkersAiInput — image block translation", () => {
     };
     const built = buildWorkersAiInput(req);
     expect(built.messages).toHaveLength(1);
-    const msg = built.messages[0];
+    const msg = built.messages[0]!;
     expect(Array.isArray(msg.content)).toBe(true);
     const parts = msg.content as Array<{ type: string; text?: string;
       image_url?: { url: string } }>;
@@ -402,7 +402,7 @@ describe("buildWorkersAiInput — image block translation", () => {
       ],
     };
     const built = buildWorkersAiInput(req);
-    const parts = built.messages[0].content as Array<{
+    const parts = built.messages[0]!.content as Array<{
       type: string; image_url?: { url: string } }>;
     expect(parts).toHaveLength(1);
     expect(parts[0]).toEqual({
@@ -418,6 +418,6 @@ describe("buildWorkersAiInput — image block translation", () => {
       messages: [{ role: "user", content: "hello" }],
     };
     const built = buildWorkersAiInput(req);
-    expect(typeof built.messages[0].content).toBe("string");
+    expect(typeof built.messages[0]!.content).toBe("string");
   });
 });

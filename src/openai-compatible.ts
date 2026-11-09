@@ -376,7 +376,7 @@ export function streamOpenAIAsAnthropic(
           type: "error",
           error: {
             type: "api_error",
-            message: err instanceof Error ? err.message : `${providerLabel} stream failed`,
+            message: `${providerLabel} stream failed`,
           },
         });
       } finally {

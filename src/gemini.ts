@@ -689,7 +689,7 @@ export function streamGeminiAsAnthropic(
           type: "error",
           error: {
             type: "api_error",
-            message: err instanceof Error ? err.message : "Gemini stream failed",
+            message: "Gemini stream failed",
           },
         });
       } finally {
