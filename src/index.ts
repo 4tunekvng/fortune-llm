@@ -33,7 +33,6 @@ import {
 import { callMistral, DEFAULT_MISTRAL_MODEL } from "./mistral.js";
 import {
   callOpenRouter,
-  DEFAULT_OPENROUTER_MODELS,
   resolveOpenRouterModels,
 } from "./openrouter.js";
 import {
