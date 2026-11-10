@@ -895,6 +895,73 @@ export default {
 
 // ── Tier dispatcher ───────────────────────────────────────────────────────────
 
+/**
+ * Tiers that take one API key and one model and speak the OpenAI-compatible
+ * wire format. Each entry names the env key (also used in the "not
+ * configured" error) and how to pick the model.
+ */
+const SINGLE_MODEL_TIERS = {
+  groq: {
+    keyName: "GROQ_API_KEY",
+    model: (env: Env) => env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL,
+    call: callGroq,
+  },
+  cerebras: {
+    keyName: "CEREBRAS_API_KEY",
+    model: (env: Env) => env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL,
+    call: callCerebras,
+  },
+  "github-models": {
+    keyName: "GITHUB_MODELS_API_KEY",
+    model: (env: Env) =>
+      env.DEFAULT_GITHUB_MODELS_MODEL ?? DEFAULT_GITHUB_MODELS_MODEL,
+    call: callGitHubModels,
+  },
+  mistral: {
+    keyName: "MISTRAL_API_KEY",
+    model: (env: Env) => env.DEFAULT_MISTRAL_MODEL ?? DEFAULT_MISTRAL_MODEL,
+    call: callMistral,
+  },
+} as const satisfies Partial<
+  Record<
+    BackendKind & ByokProvider,
+    {
+      keyName: keyof Env;
+      model: (env: Env) => string;
+      call: (
+        opts: { apiKey: string; model: string },
+        req: AnthropicMessagesRequest,
+      ) => Promise<Response>;
+    }
+  >
+>;
+
+function isSingleModelTier(
+  tier: BackendKind,
+): tier is keyof typeof SINGLE_MODEL_TIERS {
+  return Object.hasOwn(SINGLE_MODEL_TIERS, tier);
+}
+
+/**
+ * Copy a backend response with the gateway's per-tier diagnostic headers
+ * added. A key the caller supplied (BYOK) is flagged so they can tell
+ * their own quota was used.
+ */
+function withTierHeaders(
+  resp: Response,
+  extra: Record<string, string>,
+  keySource?: "byok" | "shared",
+): Response {
+  const headers = new Headers(resp.headers);
+  for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  if (keySource === "byok") headers.set("x-fortune-llm-byok", "true");
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
+}
+
 async function invokeTier(
   tier: BackendKind,
   env: Env,
@@ -905,24 +972,14 @@ async function invokeTier(
   if (tier === "workers-ai") {
     const model = env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it";
     const resp = await callWorkersAi(env.AI, model, parsed);
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
+    return withTierHeaders(resp, { "x-fortune-llm-model": model });
   }
-  // BYOK helper: every non-workers-ai tier supports per-request key
-  // override via x-fortune-byok-<provider>: <key>. Header wins; shared
-  // env key is the fallback. `null` → tier not configured (handler
-  // throws and dispatcher advances to the next tier).
-  const reqHeaders = request.headers;
+  // BYOK: every non-workers-ai tier supports per-request key override via
+  // x-fortune-byok-<provider>: <key>. Header wins; shared env key is the
+  // fallback. `null` → tier not configured (handler throws and dispatcher
+  // advances to the next tier).
   const resolveKey = (provider: ByokProvider, shared: string | undefined) =>
-    resolveProviderKey(provider, shared, reqHeaders);
-  const annotateByok = (headers: Headers, source: "byok" | "shared") => {
-    if (source === "byok") headers.set("x-fortune-llm-byok", "true");
-  };
+    resolveProviderKey(provider, shared, request.headers);
 
   if (tier === "gemini") {
     const byok = resolveKey("gemini", undefined);
@@ -942,77 +999,28 @@ async function invokeTier(
       parsed,
       isQuotaError,
     );
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    if (keys.length > 1) {
-      headers.set("x-fortune-llm-gemini-keys", String(keys.length));
-    }
-    if (byok) annotateByok(headers, byok.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
-  }
-  if (tier === "groq") {
-    const resolved = resolveKey("groq", env.GROQ_API_KEY);
-    if (!resolved) throw new Error("GROQ_API_KEY not configured");
-    const model = env.DEFAULT_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
-    const resp = await callGroq({ apiKey: resolved.key, model }, parsed);
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    annotateByok(headers, resolved.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
-  }
-  if (tier === "cerebras") {
-    const resolved = resolveKey("cerebras", env.CEREBRAS_API_KEY);
-    if (!resolved) throw new Error("CEREBRAS_API_KEY not configured");
-    const model = env.DEFAULT_CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL;
-    const resp = await callCerebras({ apiKey: resolved.key, model }, parsed);
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    annotateByok(headers, resolved.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
-  }
-  if (tier === "github-models") {
-    const resolved = resolveKey("github-models", env.GITHUB_MODELS_API_KEY);
-    if (!resolved) throw new Error("GITHUB_MODELS_API_KEY not configured");
-    const model =
-      env.DEFAULT_GITHUB_MODELS_MODEL ?? DEFAULT_GITHUB_MODELS_MODEL;
-    const resp = await callGitHubModels(
-      { apiKey: resolved.key, model },
-      parsed,
+    return withTierHeaders(
+      resp,
+      {
+        "x-fortune-llm-model": model,
+        ...(keys.length > 1
+          ? { "x-fortune-llm-gemini-keys": String(keys.length) }
+          : {}),
+      },
+      byok?.source,
     );
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    annotateByok(headers, resolved.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
   }
-  if (tier === "mistral") {
-    const resolved = resolveKey("mistral", env.MISTRAL_API_KEY);
-    if (!resolved) throw new Error("MISTRAL_API_KEY not configured");
-    const model = env.DEFAULT_MISTRAL_MODEL ?? DEFAULT_MISTRAL_MODEL;
-    const resp = await callMistral({ apiKey: resolved.key, model }, parsed);
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", model);
-    annotateByok(headers, resolved.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
+  if (isSingleModelTier(tier)) {
+    const spec = SINGLE_MODEL_TIERS[tier];
+    const resolved = resolveKey(tier, env[spec.keyName]);
+    if (!resolved) throw new Error(`${spec.keyName} not configured`);
+    const model = spec.model(env);
+    const resp = await spec.call({ apiKey: resolved.key, model }, parsed);
+    return withTierHeaders(
+      resp,
+      { "x-fortune-llm-model": model },
+      resolved.source,
+    );
   }
   if (tier === "openrouter") {
     const resolved = resolveKey("openrouter", env.OPENROUTER_API_KEY);
@@ -1022,18 +1030,14 @@ async function invokeTier(
       { apiKey: resolved.key, models },
       parsed,
     );
-    const headers = new Headers(resp.headers);
-    headers.set("x-fortune-llm-model", models[0] ?? "unknown");
-    headers.set(
-      "x-fortune-llm-openrouter-models",
-      String(models.length),
+    return withTierHeaders(
+      resp,
+      {
+        "x-fortune-llm-model": models[0] ?? "unknown",
+        "x-fortune-llm-openrouter-models": String(models.length),
+      },
+      resolved.source,
     );
-    annotateByok(headers, resolved.source);
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
   }
   // tier === "anthropic" — paid escape valve. Auto-appended when ANTHROPIC_API_KEY
   // is configured (free chain failed → paid), or reached via explicit metadata
@@ -1042,16 +1046,7 @@ async function invokeTier(
   const anth = resolveKey("anthropic", env.ANTHROPIC_API_KEY);
   if (!anth) throw new Error("ANTHROPIC_API_KEY not configured");
   const resp = await forwardToAnthropic(request, rawBody, anth.key);
-  if (anth.source === "byok") {
-    const headers = new Headers(resp.headers);
-    annotateByok(headers, "byok");
-    return new Response(resp.body, {
-      status: resp.status,
-      statusText: resp.statusText,
-      headers,
-    });
-  }
-  return resp;
+  return anth.source === "byok" ? withTierHeaders(resp, {}, "byok") : resp;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
