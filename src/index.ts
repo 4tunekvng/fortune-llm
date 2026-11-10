@@ -505,12 +505,7 @@ async function runChain(
       headers.set("x-fortune-llm-chain", chain.tiers.join(","));
       headers.set("x-fortune-llm-reason", chain.reason);
       if (errors.length > 0) {
-        headers.set(
-          "x-fortune-llm-prior-errors",
-          errors
-            .map((e) => `${e.tier}:${e.error.slice(0, 80)}`)
-            .join(" | "),
-        );
+        headers.set("x-fortune-llm-prior-errors", formatPriorErrorsHeader(errors));
       }
       if (skipped.length > 0) {
         headers.set("x-fortune-llm-skipped", formatSkippedHeader(skipped));
@@ -1069,6 +1064,20 @@ const EXPOSE_HEADERS =
   "x-fortune-llm-gemini-keys, x-fortune-llm-openrouter-models, " +
   "x-fortune-llm-cache, x-fortune-llm-cache-age-s, x-fortune-llm-rate-limit, " +
   "x-fortune-llm-rate-scope, x-fortune-llm-byok";
+
+/**
+ * Upstream error text is often pretty-printed JSON. A newline or other
+ * control character makes `Headers.set` throw, which would discard the
+ * successful tier's response, so collapse them to spaces.
+ */
+export function formatPriorErrorsHeader(
+  errors: Array<{ tier: BackendKind; error: string }>,
+): string {
+  return errors
+    .map((e) => `${e.tier}:${e.error.slice(0, 80)}`)
+    .join(" | ")
+    .replace(/[\x00-\x1f\x7f]+/g, " ");
+}
 
 function formatSkippedHeader(
   skipped: Array<{ tier: BackendKind; until: number }>,
