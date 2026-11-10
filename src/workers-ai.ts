@@ -34,6 +34,13 @@ import type {
   WorkersAiChatResponse,
 } from "./types.js";
 import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./structured-output.js";
+import {
+  messageStartEvent,
+  parseSseDataLine,
+  randomId,
+  sseEventWriter,
+  sseResponse,
+} from "./sse.js";
 
 export interface AiBinding {
   run(model: string, input: unknown): Promise<unknown>;
@@ -422,12 +429,6 @@ function estimatePromptTokens(input: WorkersAiChatRequest): number {
   return Math.ceil(chars / 4);
 }
 
-function randomId(): string {
-  const buf = new Uint8Array(6);
-  crypto.getRandomValues(buf);
-  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 /**
  * Synthesize an Anthropic SSE stream from a fully-buffered Workers AI
  * tool-call response. We emit text deltas (if any) followed by one
@@ -441,31 +442,14 @@ export function synthesizeToolStream(
   const messageId = `msg_wa_${randomId()}`;
   const { text, toolCalls } = extractWorkersAiContent(result);
 
-  const encoder = new TextEncoder();
   const downstream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const writeEvent = (event: string, data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
-      };
+      const writeEvent = sseEventWriter(controller);
 
-      writeEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: messageId,
-          type: "message",
-          role: "assistant",
-          model: modelLabel,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: {
-            input_tokens: result.usage?.prompt_tokens ?? 0,
-            output_tokens: 0,
-          },
-        },
-      });
+      writeEvent(
+        "message_start",
+        messageStartEvent(messageId, modelLabel, result.usage?.prompt_tokens ?? 0),
+      );
 
       let blockIndex = 0;
       if (text) {
@@ -519,14 +503,7 @@ export function synthesizeToolStream(
     },
   });
 
-  return new Response(downstream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    },
-  });
+  return sseResponse(downstream);
 }
 
 export function streamWorkersAiAsAnthropic(
@@ -534,30 +511,13 @@ export function streamWorkersAiAsAnthropic(
   modelLabel: string,
 ): Response {
   const messageId = `msg_wa_${randomId()}`;
-  const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = (event: string, data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
-      };
+      const writeEvent = sseEventWriter(controller);
 
-      writeEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: messageId,
-          type: "message",
-          role: "assistant",
-          model: modelLabel,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      });
+      writeEvent("message_start", messageStartEvent(messageId, modelLabel));
       writeEvent("content_block_start", {
         type: "content_block_start",
         index: 0,
@@ -578,7 +538,7 @@ export function streamWorkersAiAsAnthropic(
             while ((cut = buffer.indexOf("\n\n")) !== -1) {
               const frame = buffer.slice(0, cut);
               buffer = buffer.slice(cut + 2);
-              const payload = parseSseFrame(frame);
+              const payload = parseSseDataLine(frame);
               if (!payload || payload === "[DONE]") continue;
               const delta = extractWorkersAiDelta(payload);
               if (!delta) continue;
@@ -590,7 +550,7 @@ export function streamWorkersAiAsAnthropic(
               });
             }
             if (buffer.trim()) {
-              const payload = parseSseFrame(buffer.trim());
+              const payload = parseSseDataLine(buffer.trim());
               if (payload && payload !== "[DONE]") {
                 const delta = extractWorkersAiDelta(payload);
                 if (delta) {
@@ -610,7 +570,7 @@ export function streamWorkersAiAsAnthropic(
           while ((cut = buffer.indexOf("\n\n")) !== -1) {
             const frame = buffer.slice(0, cut);
             buffer = buffer.slice(cut + 2);
-            const payload = parseSseFrame(frame);
+            const payload = parseSseDataLine(frame);
             if (!payload) continue;
             if (payload === "[DONE]") continue;
             const delta = extractWorkersAiDelta(payload);
@@ -652,22 +612,7 @@ export function streamWorkersAiAsAnthropic(
     },
   });
 
-  return new Response(downstream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    },
-  });
-}
-
-function parseSseFrame(frame: string): string | null {
-  const lines = frame.split("\n");
-  for (const line of lines) {
-    if (line.startsWith("data:")) return line.slice(5).trim();
-  }
-  return null;
+  return sseResponse(downstream);
 }
 
 export function extractWorkersAiDelta(jsonPayload: string): string | null {

@@ -22,35 +22,81 @@
 
 import type { AnthropicMessageResponse } from "./types.js";
 
+const encoder = new TextEncoder();
+
+/** Returns a writer that emits one named SSE event onto the stream. */
+export function sseEventWriter(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+): (event: string, data: unknown) => void {
+  return (event, data) => {
+    controller.enqueue(
+      encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+    );
+  };
+}
+
+/**
+ * message_start: the envelope without content. The Anthropic SDK's stream
+ * parser uses it to initialize the message that later events fill in.
+ * output_tokens starts at 0; the final count arrives via message_delta.
+ */
+export function messageStartEvent(
+  id: string,
+  model: string,
+  inputTokens = 0,
+): unknown {
+  return {
+    type: "message_start",
+    message: {
+      id,
+      type: "message",
+      role: "assistant",
+      model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: inputTokens, output_tokens: 0 },
+    },
+  };
+}
+
+/** Wrap an SSE byte stream in a response with no-buffering headers. */
+export function sseResponse(body: ReadableStream<Uint8Array>): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
+/** The payload of the first `data:` line in one SSE frame, if any. */
+export function parseSseDataLine(frame: string): string | null {
+  const lines = frame.split("\n");
+  for (const line of lines) {
+    if (line.startsWith("data:")) return line.slice(5).trim();
+  }
+  return null;
+}
+
+/** 12 random hex characters for synthesized message and tool ids. */
+export function randomId(): string {
+  const buf = new Uint8Array(6);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function synthesizeAnthropicSSE(message: AnthropicMessageResponse): Response {
-  const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const writeEvent = (event: string, data: unknown): void => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
-      };
+      const writeEvent = sseEventWriter(controller);
 
-      // message_start: envelope without content. The Anthropic SDK's
-      // stream parser uses this to initialize the message object that
-      // later events accumulate into.
-      writeEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: message.id,
-          type: "message",
-          role: "assistant",
-          model: message.model,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: {
-            input_tokens: message.usage.input_tokens,
-            output_tokens: 0, // output_tokens accumulates as deltas arrive; final value comes via message_delta
-          },
-        },
-      });
+      writeEvent(
+        "message_start",
+        messageStartEvent(message.id, message.model, message.usage.input_tokens),
+      );
 
       // Per-block: open, emit content as a single delta, close. We don't
       // chunk the text into multiple small deltas because (a) the cache
@@ -106,12 +152,5 @@ export function synthesizeAnthropicSSE(message: AnthropicMessageResponse): Respo
     },
   });
 
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    },
-  });
+  return sseResponse(stream);
 }

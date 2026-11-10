@@ -30,6 +30,13 @@ import type {
   OpenAIToolCall,
 } from "./types.js";
 import { buildWorkersAiInput } from "./workers-ai.js";
+import {
+  messageStartEvent,
+  parseSseDataLine,
+  randomId,
+  sseEventWriter,
+  sseResponse,
+} from "./sse.js";
 
 /**
  * Static config for an OpenAI-compatible backend. The headers map gets
@@ -253,30 +260,13 @@ export function streamOpenAIAsAnthropic(
   providerLabel: string,
 ): Response {
   const messageId = `msg_oai_${randomId()}`;
-  const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = (event: string, data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
-      };
+      const writeEvent = sseEventWriter(controller);
 
-      writeEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: messageId,
-          type: "message",
-          role: "assistant",
-          model: modelLabel,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      });
+      writeEvent("message_start", messageStartEvent(messageId, modelLabel));
 
       // Block layout: text block (if any) is index 0; each tool_call gets
       // its own block. We open the text block lazily on first content,
@@ -470,22 +460,7 @@ export function streamOpenAIAsAnthropic(
     },
   });
 
-  return new Response(downstream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    },
-  });
-}
-
-function parseSseDataLine(frame: string): string | null {
-  const lines = frame.split("\n");
-  for (const line of lines) {
-    if (line.startsWith("data:")) return line.slice(5).trim();
-  }
-  return null;
+  return sseResponse(downstream);
 }
 
 function safeJsonParse(s: string): unknown {
@@ -494,10 +469,4 @@ function safeJsonParse(s: string): unknown {
   } catch {
     return null;
   }
-}
-
-function randomId(): string {
-  const buf = new Uint8Array(6);
-  crypto.getRandomValues(buf);
-  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
