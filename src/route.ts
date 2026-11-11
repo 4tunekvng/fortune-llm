@@ -134,7 +134,7 @@ export function decideRoute(
   if (options.anthropicFallback) {
     return {
       tiers: [...free, "anthropic"],
-      reason: `${baseReason}${structured}; anthropic appended as last-resort (free chain failed → paid)`,
+      reason: `${baseReason}${structured}; anthropic appended as last-resort (free chain failed -> paid)`,
     };
   }
   return { tiers: free, reason: `${baseReason}${structured}` };
