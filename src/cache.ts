@@ -95,6 +95,10 @@ export async function computeCacheKey(req: AnthropicMessagesRequest): Promise<st
     top_k: typeof req.top_k === "number" ? req.top_k : null,
     stop_sequences: Array.isArray(req.stop_sequences) ? req.stop_sequences : null,
     max_tokens: req.max_tokens,
+    // A JSON-schema request must never be answered from a cached reply
+    // made for another schema (or for plain text).
+    output_config: req.output_config ?? null,
+    thinking: req.thinking ?? null,
   });
   const enc = new TextEncoder().encode(canonical);
   const hashBuf = await crypto.subtle.digest("SHA-256", enc);

@@ -104,6 +104,27 @@ describe("computeCacheKey", () => {
     expect(a).toBe(b);
   });
 
+  it("differs when the output schema differs", async () => {
+    const format = (prop: string) => ({
+      format: { type: "json_schema", schema: { properties: { [prop]: {} } } },
+    });
+    const a = await computeCacheKey(
+      baseReq({ temperature: 0, output_config: format("a") }),
+    );
+    const b = await computeCacheKey(
+      baseReq({ temperature: 0, output_config: format("b") }),
+    );
+    expect(a).not.toBe(b);
+  });
+
+  it("differs when one request asks for a schema and the other doesn't", async () => {
+    const plain = await computeCacheKey(baseReq({ temperature: 0 }));
+    const schema = await computeCacheKey(
+      baseReq({ temperature: 0, output_config: { format: { type: "json_schema" } } }),
+    );
+    expect(plain).not.toBe(schema);
+  });
+
   it("differs when temperature differs", async () => {
     const a = await computeCacheKey(baseReq({ temperature: 0 }));
     const b = await computeCacheKey(baseReq({ temperature: 0.5 }));
