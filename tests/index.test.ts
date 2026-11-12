@@ -32,7 +32,8 @@ describe("fetch handler fallback chain", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        const body = '{\n  "error": {\n    "message": "boom"\n  }\n}';
+        const body =
+          '{\n  "error": {\n    "message": "org_secret123 over limit"\n  }\n}';
         return new Response(body, { status: 500 });
       }),
     );
@@ -51,7 +52,8 @@ describe("fetch handler fallback chain", () => {
     expect(resp.status).toBe(200);
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     const priorErrors = resp.headers.get("x-fortune-llm-prior-errors");
-    expect(priorErrors).toMatch(/^groq:Groq 500: \{ +"error"/);
+    expect(priorErrors).toMatch(/^groq:Groq 500 \| /);
+    expect(priorErrors).not.toContain("org_secret123");
   });
 });
 

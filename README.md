@@ -82,7 +82,7 @@ x-fortune-llm-route:                 groq | workers-ai | gemini | openrouter | a
 x-fortune-llm-model:                 the actual model executed
 x-fortune-llm-chain:                 groq,workers-ai,gemini,openrouter
 x-fortune-llm-reason:                why this chain was picked
-x-fortune-llm-prior-errors:          tier:msg | tier:msg   (only when a tier failed before success)
+x-fortune-llm-prior-errors:          tier:Label status | …  (only when a tier failed before success)
 x-fortune-llm-gemini-keys:           N                       (only when N > 1 keys are configured)
 x-fortune-llm-openrouter-models:     N                       (size of the OpenRouter fallback list)
 x-fortune-llm-skipped:               tier:<ISO>,…            (tiers whose circuit was open)

@@ -1060,15 +1060,17 @@ const EXPOSE_HEADERS =
   "x-fortune-llm-rate-scope, x-fortune-llm-byok";
 
 /**
- * Upstream error text is often pretty-printed JSON. A newline or other
- * control character makes `Headers.set` throw, which would discard the
+ * Names each failed tier with only the leading `<Label> <status>` part of its
+ * error (the text before the first colon). The rest is the raw upstream body,
+ * which can carry account details, so it stays in `console.error`.
+ * Control characters make `Headers.set` throw, which would discard the
  * successful tier's response, so collapse them to spaces.
  */
 export function formatPriorErrorsHeader(
   errors: Array<{ tier: BackendKind; error: string }>,
 ): string {
   return errors
-    .map((e) => `${e.tier}:${e.error.slice(0, 80)}`)
+    .map((e) => `${e.tier}:${(e.error.split(":")[0] ?? "").slice(0, 80)}`)
     .join(" | ")
     .replace(/[\x00-\x1f\x7f]+/g, " ");
 }
