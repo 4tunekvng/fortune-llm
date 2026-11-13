@@ -104,6 +104,14 @@ describe("computeCacheKey", () => {
     expect(a).toBe(b);
   });
 
+  it("differs when metadata.fortune_route picks another provider", async () => {
+    const auto = await computeCacheKey(baseReq({ temperature: 0 }));
+    const forced = await computeCacheKey(
+      baseReq({ temperature: 0, metadata: { fortune_route: "anthropic" } }),
+    );
+    expect(auto).not.toBe(forced);
+  });
+
   it("differs when the output schema differs", async () => {
     const format = (prop: string) => ({
       format: { type: "json_schema", schema: { properties: { [prop]: {} } } },

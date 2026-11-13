@@ -24,10 +24,9 @@
  * cache-eligible stream:true requests are dispatched non-streaming
  * upstream, cached as JSON, and re-emitted as SSE via sse.ts.
  *
- * Hash inputs:
- *   model, system, messages, tools, tool_choice, temperature, top_p,
- *   top_k, stop_sequences, max_tokens. Skipped: stream, metadata
- *   (cosmetic), output_config (already routed straight to anthropic).
+ * Hash inputs: every request field except stream and metadata, plus
+ * metadata.fortune_route (it picks which provider answers). See
+ * computeCacheKey.
  */
 
 import type { AnthropicMessagesRequest } from "./types.js";
@@ -76,15 +75,20 @@ export function isCacheable(req: AnthropicMessagesRequest): boolean {
 }
 
 // Request fields that never change the reply. `stream` only changes the
-// wire format (a hit is replayed either way) and `metadata` carries routing
-// knobs. Every other field is hashed, so a field this list doesn't know about
-// (output_format, container, a future one) can never make two different
-// requests share a cached reply.
+// wire format (a hit is replayed either way) and `metadata` mostly carries
+// cache and tracking knobs. Every other field is hashed, so a field this list
+// doesn't know about (output_format, container, a future one) can never make
+// two different requests share a cached reply.
 const KEY_IGNORED_FIELDS = new Set(["stream", "metadata"]);
+
+// Metadata knobs that do change the reply: fortune_route picks the provider,
+// so a caller forcing Anthropic must not get a cached Workers AI answer.
+const KEY_METADATA_FIELDS = ["fortune_route"];
 
 /**
  * Compute the deterministic cache key for a request: every field except
- * KEY_IGNORED_FIELDS, in sorted order so field order doesn't matter.
+ * KEY_IGNORED_FIELDS, in sorted order so field order doesn't matter, plus
+ * the KEY_METADATA_FIELDS the caller set.
  *
  * Returns a short SHA-256-derived string prefixed with `cache:` so
  * it can share a KV namespace with the circuit breaker without
@@ -94,7 +98,12 @@ export async function computeCacheKey(req: AnthropicMessagesRequest): Promise<st
   const fields = Object.keys(req)
     .filter((k) => !KEY_IGNORED_FIELDS.has(k) && req[k] !== undefined)
     .sort();
-  const canonical = JSON.stringify(fields.map((k) => [k, req[k]]));
+  const meta = req.metadata ?? {};
+  const metaFields = KEY_METADATA_FIELDS.filter((k) => meta[k] !== undefined);
+  const canonical = JSON.stringify([
+    ...fields.map((k) => [k, req[k]]),
+    ...metaFields.map((k) => [`metadata.${k}`, meta[k]]),
+  ]);
   const enc = new TextEncoder().encode(canonical);
   const hashBuf = await crypto.subtle.digest("SHA-256", enc);
   const hashArr = Array.from(new Uint8Array(hashBuf));
