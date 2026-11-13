@@ -97,14 +97,17 @@ Exact-match KV cache keyed on the request hash. A second identical
 request inside the TTL returns the cached response without touching any
 provider — biggest single quota multiplier on top of the multi-provider
 chain.
+Streaming requests share the same entries: a hit is replayed as a
+stream. The hash covers every request field except `stream` and
+`metadata`, plus `metadata.fortune_route`.
 
 | Setting | Default | Notes |
 |---|---|---|
 | TTL | 24h | Override via `CACHE_TTL_SECONDS` in `[vars]`. Floored at 60s (KV min), capped at 30 days. Set 0 to disable. |
-| Auto-cache when… | `temperature === 0` and no tools and not streaming | Apps that ask for determinism get the determinism benefit automatically. |
+| Auto-cache when… | `temperature === 0` and no tools | Apps that ask for determinism get the determinism benefit automatically. |
 | Per-request opt-in | `metadata.fortune_cache = true` | Caches even with temperature > 0. |
 | Per-request opt-out | `metadata.fortune_no_cache = true` | Always wins. |
-| Never cached | Streaming requests, tool-using requests, `fortune_require_tools` | Too in-context-sensitive to safely return verbatim. |
+| Never cached | Tool-using requests, `fortune_require_tools` | Too in-context-sensitive to safely return verbatim. |
 
 ## Rate limit
 
