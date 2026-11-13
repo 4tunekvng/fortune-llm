@@ -75,31 +75,26 @@ export function isCacheable(req: AnthropicMessagesRequest): boolean {
   return false;
 }
 
+// Request fields that never change the reply. `stream` only changes the
+// wire format (a hit is replayed either way) and `metadata` carries routing
+// knobs. Every other field is hashed, so a field this list doesn't know about
+// (output_format, container, a future one) can never make two different
+// requests share a cached reply.
+const KEY_IGNORED_FIELDS = new Set(["stream", "metadata"]);
+
 /**
- * Compute the deterministic cache key for a request. Only fields that
- * affect the response are hashed.
+ * Compute the deterministic cache key for a request: every field except
+ * KEY_IGNORED_FIELDS, in sorted order so field order doesn't matter.
  *
  * Returns a short SHA-256-derived string prefixed with `cache:` so
  * it can share a KV namespace with the circuit breaker without
  * collision.
  */
 export async function computeCacheKey(req: AnthropicMessagesRequest): Promise<string> {
-  const canonical = JSON.stringify({
-    model: req.model,
-    system: req.system ?? null,
-    messages: req.messages,
-    tools: req.tools ?? null,
-    tool_choice: req.tool_choice ?? null,
-    temperature: typeof req.temperature === "number" ? req.temperature : null,
-    top_p: typeof req.top_p === "number" ? req.top_p : null,
-    top_k: typeof req.top_k === "number" ? req.top_k : null,
-    stop_sequences: Array.isArray(req.stop_sequences) ? req.stop_sequences : null,
-    max_tokens: req.max_tokens,
-    // A JSON-schema request must never be answered from a cached reply
-    // made for another schema (or for plain text).
-    output_config: req.output_config ?? null,
-    thinking: req.thinking ?? null,
-  });
+  const fields = Object.keys(req)
+    .filter((k) => !KEY_IGNORED_FIELDS.has(k) && req[k] !== undefined)
+    .sort();
+  const canonical = JSON.stringify(fields.map((k) => [k, req[k]]));
   const enc = new TextEncoder().encode(canonical);
   const hashBuf = await crypto.subtle.digest("SHA-256", enc);
   const hashArr = Array.from(new Uint8Array(hashBuf));

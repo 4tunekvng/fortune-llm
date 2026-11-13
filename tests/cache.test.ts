@@ -130,6 +130,26 @@ describe("computeCacheKey", () => {
     const b = await computeCacheKey(baseReq({ temperature: 0.5 }));
     expect(a).not.toBe(b);
   });
+
+  it("differs on a request field the key code doesn't name", async () => {
+    const plain = await computeCacheKey(baseReq({ temperature: 0 }));
+    const legacySchema = await computeCacheKey(
+      baseReq({ temperature: 0, output_format: { type: "json_schema" } }),
+    );
+    expect(plain).not.toBe(legacySchema);
+  });
+
+  it("is the SAME when only stream or field order differs", async () => {
+    const a = await computeCacheKey(baseReq({ temperature: 0 }));
+    const b = await computeCacheKey({
+      temperature: 0,
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 256,
+      model: "claude-sonnet-4-6",
+    });
+    expect(a).toBe(b);
+  });
 });
 
 describe("readCache / writeCache", () => {
