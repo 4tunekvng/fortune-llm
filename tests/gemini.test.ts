@@ -549,6 +549,19 @@ describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", (
     expect(delta?.delta?.stop_reason).toBe("tool_use");
   });
 
+  it("streams every chunk when the upstream ends lines with CRLF", async () => {
+    const chunk = (text: string) =>
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] })}\r\n\r\n`;
+    const upstream = new Response(chunk("hello") + chunk(" world")).body!;
+
+    const events = await consumeDownstream(streamGeminiAsAnthropic(upstream, "gemini"));
+
+    const texts = events
+      .filter((e) => e.type === "content_block_delta")
+      .map((e) => (e as { delta: { text: string } }).delta.text);
+    expect(texts.join("")).toBe("hello world");
+  });
+
   it("emits stop_reason=end_turn for a pure-text response", async () => {
     const upstream = makeUpstream([{ text: "hi there" }]);
     const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");

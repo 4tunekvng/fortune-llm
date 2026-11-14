@@ -33,6 +33,7 @@ import { buildWorkersAiInput } from "./workers-ai.js";
 import {
   messageStartEvent,
   parseSseDataLine,
+  splitSseFrames,
   randomId,
   sseEventWriter,
   sseResponse,
@@ -343,22 +344,17 @@ export function streamOpenAIAsAnthropic(
             const tail = decoder.decode();
             if (tail) buffer += tail;
             // Flush any remaining frames.
-            let cut: number;
-            while ((cut = buffer.indexOf("\n\n")) !== -1) {
-              processFrame(buffer.slice(0, cut));
-              buffer = buffer.slice(cut + 2);
-            }
+            const split = splitSseFrames(buffer);
+            buffer = split.rest;
+            split.frames.forEach(processFrame);
             if (buffer.trim()) processFrame(buffer.trim());
             buffer = "";
             break;
           }
           buffer += decoder.decode(value, { stream: true });
-          let cut: number;
-          while ((cut = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, cut);
-            buffer = buffer.slice(cut + 2);
-            processFrame(frame);
-          }
+          const split = splitSseFrames(buffer);
+          buffer = split.rest;
+          split.frames.forEach(processFrame);
         }
       } catch (err) {
         streamError = true;

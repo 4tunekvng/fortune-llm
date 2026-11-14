@@ -37,6 +37,7 @@ import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./struc
 import {
   messageStartEvent,
   parseSseDataLine,
+  splitSseFrames,
   randomId,
   sseEventWriter,
   sseResponse,
@@ -534,10 +535,9 @@ export function streamWorkersAiAsAnthropic(
           if (done) {
             const tail = decoder.decode();
             if (tail) buffer += tail;
-            let cut: number;
-            while ((cut = buffer.indexOf("\n\n")) !== -1) {
-              const frame = buffer.slice(0, cut);
-              buffer = buffer.slice(cut + 2);
+            const split = splitSseFrames(buffer);
+            buffer = split.rest;
+            for (const frame of split.frames) {
               const payload = parseSseDataLine(frame);
               if (!payload || payload === "[DONE]") continue;
               const delta = extractWorkersAiDelta(payload);
@@ -566,10 +566,9 @@ export function streamWorkersAiAsAnthropic(
             break;
           }
           buffer += decoder.decode(value, { stream: true });
-          let cut: number;
-          while ((cut = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, cut);
-            buffer = buffer.slice(cut + 2);
+          const split = splitSseFrames(buffer);
+          buffer = split.rest;
+          for (const frame of split.frames) {
             const payload = parseSseDataLine(frame);
             if (!payload) continue;
             if (payload === "[DONE]") continue;

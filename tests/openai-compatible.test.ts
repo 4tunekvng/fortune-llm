@@ -356,4 +356,17 @@ describe("streamOpenAIAsAnthropic", () => {
     expect(text).toContain('"text":"hello"');
     expect(text).toContain('"text":" world"');
   });
+
+  it("streams every event when the upstream ends lines with CRLF", async () => {
+    const body =
+      'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\r\n\r\n' +
+      'data: {"choices":[{"index":0,"delta":{"content":" world"}}]}\r\n\r\n' +
+      "data: [DONE]\r\n\r\n";
+    const stream = new Response(body).body as ReadableStream<Uint8Array>;
+
+    const text = await streamOpenAIAsAnthropic(stream, "test", "test").text();
+
+    expect(text).toContain('"text":"hello"');
+    expect(text).toContain('"text":" world"');
+  });
 });

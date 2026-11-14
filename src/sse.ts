@@ -72,9 +72,24 @@ export function sseResponse(body: ReadableStream<Uint8Array>): Response {
   });
 }
 
+/**
+ * Split the complete SSE frames off the front of a stream buffer. The SSE
+ * spec lets a line end in CRLF, LF or a lone CR, and Google's own Gemini
+ * SDK splits on all three, so a "\n\n"-only split would never find a
+ * frame break in a CRLF stream and would drop all but its first event.
+ * A trailing CR stays in `rest`, since its LF may arrive in the next chunk.
+ */
+export function splitSseFrames(buffer: string): { frames: string[]; rest: string } {
+  const heldCr = buffer.endsWith("\r") ? "\r" : "";
+  const body = heldCr ? buffer.slice(0, -1) : buffer;
+  const frames = body.replace(/\r\n?/g, "\n").split("\n\n");
+  const rest = frames.pop() ?? "";
+  return { frames, rest: rest + heldCr };
+}
+
 /** The payload of the first `data:` line in one SSE frame, if any. */
 export function parseSseDataLine(frame: string): string | null {
-  const lines = frame.split("\n");
+  const lines = frame.split(/\r\n?|\n/);
   for (const line of lines) {
     if (line.startsWith("data:")) return line.slice(5).trim();
   }

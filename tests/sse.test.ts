@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { synthesizeAnthropicSSE } from "../src/sse.js";
+import { parseSseDataLine, splitSseFrames, synthesizeAnthropicSSE } from "../src/sse.js";
 import type { AnthropicMessageResponse } from "../src/types.js";
 
 /**
@@ -144,5 +144,37 @@ describe("synthesizeAnthropicSSE", () => {
     expect(resp.headers.get("content-type")).toMatch(/event-stream/);
     expect(resp.headers.get("cache-control")).toContain("no-cache");
     expect(resp.headers.get("x-accel-buffering")).toBe("no");
+  });
+});
+
+describe("splitSseFrames", () => {
+  it("splits frames that end in CRLF line breaks", () => {
+    const { frames, rest } = splitSseFrames("data: a\r\n\r\ndata: b\r\n\r\ndata: c");
+
+    expect(frames).toEqual(["data: a", "data: b"]);
+    expect(rest).toBe("data: c");
+  });
+
+  it("splits frames that end in lone CR line breaks", () => {
+    const { frames } = splitSseFrames("data: a\r\rdata: b\r\rdata: c");
+
+    expect(frames).toEqual(["data: a", "data: b"]);
+  });
+
+  it("keeps a CRLF cut between two chunks in one frame break", () => {
+    const first = splitSseFrames("data: a\r\n\r");
+
+    const second = splitSseFrames(first.rest + "\ndata: b\r\n\r\n");
+
+    expect(first.frames).toEqual([]);
+    expect(second.frames).toEqual(["data: a", "data: b"]);
+  });
+});
+
+describe("parseSseDataLine", () => {
+  it("reads the data line of a CR-only frame", () => {
+    const payload = parseSseDataLine("event: x\rdata: {}");
+
+    expect(payload).toBe("{}");
   });
 });
