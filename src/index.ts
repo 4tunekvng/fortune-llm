@@ -12,7 +12,10 @@
  *                           endpoints like count_tokens / batches).
  */
 
-import type { AnthropicMessagesRequest } from "./types.js";
+import type {
+  AnthropicMessageResponse,
+  AnthropicMessagesRequest,
+} from "./types.js";
 import { authenticate } from "./auth.js";
 import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
@@ -499,6 +502,7 @@ async function runChain(
         request,
         rawBody,
       );
+      if (tier !== "anthropic") await rejectEmptyReply(tier, resp);
       const headers = new Headers(resp.headers);
       headers.set("x-fortune-llm-route", tier);
       headers.set("x-fortune-llm-chain", chain.tiers.join(","));
@@ -960,6 +964,27 @@ function withTierHeaders(
     statusText: resp.statusText,
     headers,
   });
+}
+
+/**
+ * A free model sometimes answers with no text and no tool call. Passed on,
+ * that blank reply is cached and, once stored as chat history, makes the
+ * Anthropic API reject every later turn. Throwing here moves the chain to
+ * the next tier, as the tool-silence check in callWorkersAi does. Streams
+ * are left alone: their text is not known until it has been sent.
+ */
+async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void> {
+  const type = resp.headers.get("content-type") ?? "";
+  if (resp.status !== 200 || !type.includes("application/json")) return;
+  let msg: AnthropicMessageResponse;
+  try {
+    msg = (await resp.clone().json()) as AnthropicMessageResponse;
+  } catch {
+    return;
+  }
+  const blocks = Array.isArray(msg.content) ? msg.content : [];
+  const said = blocks.some((b) => b.type !== "text" || b.text.trim() !== "");
+  if (!said) throw new Error(`${tier} returned an empty reply`);
 }
 
 async function invokeTier(

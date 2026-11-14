@@ -57,6 +57,43 @@ describe("fetch handler fallback chain", () => {
   });
 });
 
+describe("fetch handler with an empty reply", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("moves past a tier that answers with no text", async () => {
+    // Arrange: Groq answers 200 with blank content, Workers AI answers.
+    const blank = {
+      id: "chatcmpl-1",
+      choices: [{ message: { role: "assistant", content: "" } }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(blank)),
+    );
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "hello from workers ai" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(messagesRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
+      /^groq:groq returned an empty reply/,
+    );
+    expect(await resp.json()).toMatchObject({
+      content: [{ type: "text", text: "hello from workers ai" }],
+    });
+  });
+});
+
 describe("fetch handler with the paid fallback configured", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
