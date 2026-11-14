@@ -542,11 +542,12 @@ export function streamWorkersAiAsAnthropic(
         await readSseFrames(upstream, processFrame);
       } catch (err) {
         streamError = true;
+        console.error("fortune-llm: Workers AI stream failed:", err);
         writeEvent("error", {
           type: "error",
           error: {
             type: "api_error",
-            message: err instanceof Error ? err.message : "Workers AI stream failed",
+            message: "Workers AI stream failed",
           },
         });
       } finally {

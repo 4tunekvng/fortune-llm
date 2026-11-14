@@ -477,7 +477,7 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text).toContain('"usage":{"output_tokens":0}');
   });
 
-  it("reports an upstream read failure as an error event", async () => {
+  it("reports an upstream read failure as a fixed-text error event", async () => {
     const upstream = new ReadableStream<Uint8Array>({
       pull(controller) {
         controller.error(new Error("socket reset"));
@@ -487,7 +487,8 @@ describe("streamWorkersAiAsAnthropic", () => {
     const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
 
     expect(text).toContain("event: error");
-    expect(text).toContain('"message":"socket reset"');
+    expect(text).toContain('"message":"Workers AI stream failed"');
+    expect(text).not.toContain("socket reset");
     expect(text).not.toContain("message_stop");
   });
 });
