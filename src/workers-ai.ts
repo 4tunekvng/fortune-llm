@@ -37,7 +37,7 @@ import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./struc
 import {
   messageStartEvent,
   parseSseDataLine,
-  splitSseFrames,
+  readSseFrames,
   randomId,
   sseEventWriter,
   sseResponse,
@@ -512,7 +512,6 @@ export function streamWorkersAiAsAnthropic(
   modelLabel: string,
 ): Response {
   const messageId = `msg_wa_${randomId()}`;
-  const decoder = new TextDecoder();
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -526,62 +525,21 @@ export function streamWorkersAiAsAnthropic(
       });
 
       let outputTokenCount = 0;
-      let buffer = "";
       let streamError = false;
-      const reader = upstream.getReader();
+      const processFrame = (frame: string) => {
+        const payload = parseSseDataLine(frame);
+        if (!payload || payload === "[DONE]") return;
+        const delta = extractWorkersAiDelta(payload);
+        if (!delta) return;
+        outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
+        writeEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: delta },
+        });
+      };
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) {
-            const tail = decoder.decode();
-            if (tail) buffer += tail;
-            const split = splitSseFrames(buffer);
-            buffer = split.rest;
-            for (const frame of split.frames) {
-              const payload = parseSseDataLine(frame);
-              if (!payload || payload === "[DONE]") continue;
-              const delta = extractWorkersAiDelta(payload);
-              if (!delta) continue;
-              outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
-              writeEvent("content_block_delta", {
-                type: "content_block_delta",
-                index: 0,
-                delta: { type: "text_delta", text: delta },
-              });
-            }
-            if (buffer.trim()) {
-              const payload = parseSseDataLine(buffer.trim());
-              if (payload && payload !== "[DONE]") {
-                const delta = extractWorkersAiDelta(payload);
-                if (delta) {
-                  outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
-                  writeEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: 0,
-                    delta: { type: "text_delta", text: delta },
-                  });
-                }
-              }
-            }
-            break;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const split = splitSseFrames(buffer);
-          buffer = split.rest;
-          for (const frame of split.frames) {
-            const payload = parseSseDataLine(frame);
-            if (!payload) continue;
-            if (payload === "[DONE]") continue;
-            const delta = extractWorkersAiDelta(payload);
-            if (!delta) continue;
-            outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
-            writeEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: 0,
-              delta: { type: "text_delta", text: delta },
-            });
-          }
-        }
+        await readSseFrames(upstream, processFrame);
       } catch (err) {
         streamError = true;
         writeEvent("error", {
@@ -592,7 +550,6 @@ export function streamWorkersAiAsAnthropic(
           },
         });
       } finally {
-        reader.releaseLock();
         if (!streamError) {
           writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
           writeEvent("message_delta", {

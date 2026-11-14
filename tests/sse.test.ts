@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseSseDataLine, splitSseFrames, synthesizeAnthropicSSE } from "../src/sse.js";
+import {
+  parseSseDataLine,
+  readSseFrames,
+  splitSseFrames,
+  synthesizeAnthropicSSE,
+} from "../src/sse.js";
 import type { AnthropicMessageResponse } from "../src/types.js";
 
 /**
@@ -177,4 +182,23 @@ describe("parseSseDataLine", () => {
 
     expect(payload).toBe("{}");
   });
+});
+
+describe("readSseFrames", () => {
+  it("delivers each frame once, across chunk splits and a final unterminated frame",
+    async () => {
+      const encoder = new TextEncoder();
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode("data: a\n\ndata: b"));
+          controller.enqueue(encoder.encode("c\r\n\r\ndata: tail\n"));
+          controller.close();
+        },
+      });
+      const frames: string[] = [];
+
+      await readSseFrames(upstream, (f) => frames.push(f));
+
+      expect(frames).toEqual(["data: a", "data: bc", "data: tail"]);
+    });
 });

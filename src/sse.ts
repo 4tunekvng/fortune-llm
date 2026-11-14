@@ -87,6 +87,33 @@ export function splitSseFrames(buffer: string): { frames: string[]; rest: string
   return { frames, rest: rest + heldCr };
 }
 
+/**
+ * Read an upstream SSE byte stream to the end, calling `onFrame` once per
+ * complete frame. A final frame with no closing blank line is still
+ * delivered. Read errors propagate to the caller.
+ */
+export async function readSseFrames(
+  upstream: ReadableStream<Uint8Array>,
+  onFrame: (frame: string) => void,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  const reader = upstream.getReader();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const split = splitSseFrames(buffer);
+      buffer = split.rest;
+      split.frames.forEach(onFrame);
+      if (done) break;
+    }
+    if (buffer.trim()) onFrame(buffer.trim());
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** The payload of the first `data:` line in one SSE frame, if any. */
 export function parseSseDataLine(frame: string): string | null {
   const lines = frame.split(/\r\n?|\n/);

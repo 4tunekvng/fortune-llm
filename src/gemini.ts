@@ -29,7 +29,7 @@ import { getOutputSchemaObject } from "./structured-output.js";
 import {
   messageStartEvent,
   parseSseDataLine,
-  splitSseFrames,
+  readSseFrames,
   randomId,
   sseEventWriter,
   sseResponse,
@@ -606,7 +606,6 @@ export function streamGeminiAsAnthropic(
   modelLabel: string,
 ): Response {
   const messageId = `msg_gm_${randomId()}`;
-  const decoder = new TextDecoder();
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -627,7 +626,6 @@ export function streamGeminiAsAnthropic(
       let inputTokens = 0;
       let finishReason: string | undefined;
       let streamError = false;
-      let buffer = "";
 
       const closeCurrentBlock = () => {
         if (currentBlockKind !== null) {
@@ -649,26 +647,9 @@ export function streamGeminiAsAnthropic(
         }
       };
 
-      const reader = upstream.getReader();
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) {
-            const tail = decoder.decode();
-            if (tail) buffer += tail;
-            const split = splitSseFrames(buffer);
-            buffer = split.rest;
-            split.frames.forEach(processFrame);
-            if (buffer.trim()) processFrame(buffer.trim());
-            buffer = "";
-            break;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const split = splitSseFrames(buffer);
-          buffer = split.rest;
-          split.frames.forEach(processFrame);
-        }
-      } catch (err) {
+        await readSseFrames(upstream, processFrame);
+      } catch {
         streamError = true;
         writeEvent("error", {
           type: "error",
@@ -678,7 +659,6 @@ export function streamGeminiAsAnthropic(
           },
         });
       } finally {
-        reader.releaseLock();
         if (!streamError) {
           closeCurrentBlock();
           let stopReason: AnthropicStopReason = "end_turn";

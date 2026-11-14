@@ -33,7 +33,7 @@ import { buildWorkersAiInput } from "./workers-ai.js";
 import {
   messageStartEvent,
   parseSseDataLine,
-  splitSseFrames,
+  readSseFrames,
   randomId,
   sseEventWriter,
   sseResponse,
@@ -261,7 +261,6 @@ export function streamOpenAIAsAnthropic(
   providerLabel: string,
 ): Response {
   const messageId = `msg_oai_${randomId()}`;
-  const decoder = new TextDecoder();
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -282,7 +281,6 @@ export function streamOpenAIAsAnthropic(
       let inputTokens = 0;
       let outputTokens = 0;
       let streamError = false;
-      let buffer = "";
 
       interface ToolCallState {
         blockIndex: number;
@@ -336,27 +334,9 @@ export function streamOpenAIAsAnthropic(
         return state;
       };
 
-      const reader = upstream.getReader();
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) {
-            const tail = decoder.decode();
-            if (tail) buffer += tail;
-            // Flush any remaining frames.
-            const split = splitSseFrames(buffer);
-            buffer = split.rest;
-            split.frames.forEach(processFrame);
-            if (buffer.trim()) processFrame(buffer.trim());
-            buffer = "";
-            break;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const split = splitSseFrames(buffer);
-          buffer = split.rest;
-          split.frames.forEach(processFrame);
-        }
-      } catch (err) {
+        await readSseFrames(upstream, processFrame);
+      } catch {
         streamError = true;
         writeEvent("error", {
           type: "error",
@@ -366,7 +346,6 @@ export function streamOpenAIAsAnthropic(
           },
         });
       } finally {
-        reader.releaseLock();
         if (!streamError) {
           // Close any open blocks.
           for (const state of toolByIndex.values()) {
