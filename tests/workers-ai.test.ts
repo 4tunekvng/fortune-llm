@@ -6,6 +6,7 @@ import {
   extractWorkersAiDelta,
   translateTools,
   translateToolChoice,
+  streamWorkersAiAsAnthropic,
 } from "../src/workers-ai.js";
 import type { AnthropicMessagesRequest } from "../src/types.js";
 
@@ -419,5 +420,74 @@ describe("buildWorkersAiInput — image block translation", () => {
     };
     const built = buildWorkersAiInput(req);
     expect(typeof built.messages[0]!.content).toBe("string");
+  });
+});
+
+describe("streamWorkersAiAsAnthropic", () => {
+  const upstreamOf = (chunks: string[]) => {
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(encoder.encode(c));
+        controller.close();
+      },
+    });
+  };
+
+  it("emits one text block with a delta per response frame", async () => {
+    const upstream = upstreamOf([
+      'data: {"response":"hello"}\n\n',
+      'data: {"response":" world"}\n\ndata: [DONE]\n\n',
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text.match(/event: content_block_start/g)).toHaveLength(1);
+    expect(text).toContain('"text":"hello"');
+    expect(text).toContain('"text":" world"');
+    expect(text).toContain('"stop_reason":"end_turn"');
+    expect(text).toContain('"usage":{"output_tokens":4}');
+    expect(text.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+  });
+
+  it("reassembles a frame split across chunks", async () => {
+    const upstream = upstreamOf(['data: {"resp', 'onse":"joined"}\n\n']);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain('"text":"joined"');
+  });
+
+  it("keeps a final frame that lacks the closing blank line", async () => {
+    const upstream = upstreamOf([
+      'data: {"response":"a"}\n\ndata: {"response":"tail"}',
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain('"text":"tail"');
+  });
+
+  it("skips frames with no response text", async () => {
+    const upstream = upstreamOf(['data: {"usage":{}}\n\n', ": ping\n\n"]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).not.toContain("content_block_delta");
+    expect(text).toContain('"usage":{"output_tokens":0}');
+  });
+
+  it("reports an upstream read failure as an error event", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("socket reset"));
+      },
+    });
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain("event: error");
+    expect(text).toContain('"message":"socket reset"');
+    expect(text).not.toContain("message_stop");
   });
 });
