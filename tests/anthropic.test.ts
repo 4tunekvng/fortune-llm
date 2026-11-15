@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { scrubReservedMetadata } from "../src/anthropic.js";
+import { scrubForAnthropic } from "../src/anthropic.js";
 
-describe("scrubReservedMetadata", () => {
+describe("scrubForAnthropic", () => {
   it("strips metadata.fortune_route, leaves other fields intact", () => {
     const body = JSON.stringify({
       model: "claude-sonnet-4-6",
@@ -9,7 +9,7 @@ describe("scrubReservedMetadata", () => {
       messages: [{ role: "user", content: "hi" }],
       metadata: { fortune_route: "anthropic", user_id: "u_123" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
     expect(out.model).toBe("claude-sonnet-4-6");
     expect(out.messages).toHaveLength(1);
@@ -20,33 +20,33 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_route: "anthropic" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect("metadata" in out).toBe(false);
   });
 
   it("returns the original string when no reserved keys are present", () => {
     const body = JSON.stringify({ messages: [], metadata: { user_id: "u_123" } });
-    expect(scrubReservedMetadata(body)).toBe(body);
+    expect(scrubForAnthropic(body)).toBe(body);
   });
 
   it("returns the original string when metadata is absent entirely", () => {
     const body = JSON.stringify({ messages: [{ role: "user", content: "hi" }] });
-    expect(scrubReservedMetadata(body)).toBe(body);
+    expect(scrubForAnthropic(body)).toBe(body);
   });
 
   it("returns the original string for malformed JSON (let upstream reject)", () => {
     const broken = "{not valid json";
-    expect(scrubReservedMetadata(broken)).toBe(broken);
+    expect(scrubForAnthropic(broken)).toBe(broken);
   });
 
   it("handles metadata that isn't an object (defensive — passes through)", () => {
     const body = JSON.stringify({ messages: [], metadata: "not-an-object" });
-    expect(scrubReservedMetadata(body)).toBe(body);
+    expect(scrubForAnthropic(body)).toBe(body);
   });
 
   it("handles null metadata (defensive — passes through)", () => {
     const body = JSON.stringify({ messages: [], metadata: null });
-    expect(scrubReservedMetadata(body)).toBe(body);
+    expect(scrubForAnthropic(body)).toBe(body);
   });
 
   it("strips metadata.fortune_require_tools, leaves user_id intact", () => {
@@ -54,7 +54,7 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_require_tools: true, user_id: "u_123" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
   });
 
@@ -63,7 +63,7 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_route: "anthropic", fortune_require_tools: true, user_id: "u_123" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
   });
 
@@ -72,7 +72,7 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_cache: true, user_id: "u_123" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
     expect(out.metadata).not.toHaveProperty("fortune_cache");
   });
@@ -82,7 +82,7 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_no_cache: true, user_id: "u_123" },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect(out.metadata).toEqual({ user_id: "u_123" });
     expect(out.metadata).not.toHaveProperty("fortune_no_cache");
   });
@@ -92,7 +92,29 @@ describe("scrubReservedMetadata", () => {
       messages: [],
       metadata: { fortune_cache: true, fortune_no_cache: false },
     });
-    const out = JSON.parse(scrubReservedMetadata(body));
+    const out = JSON.parse(scrubForAnthropic(body));
     expect("metadata" in out).toBe(false);
+  });
+
+  it("strips temperature, top_p and top_k, which Claude 4.7+ rejects", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-5-5",
+      messages: [],
+      temperature: 0.45,
+      top_p: 0.9,
+      top_k: 40,
+    });
+    const out = JSON.parse(scrubForAnthropic(body));
+    expect(out).toEqual({ model: "claude-sonnet-5-5", messages: [] });
+  });
+
+  it("strips sampling and reserved metadata together", () => {
+    const body = JSON.stringify({
+      messages: [],
+      temperature: 0,
+      metadata: { fortune_route: "free", user_id: "u_123" },
+    });
+    const out = JSON.parse(scrubForAnthropic(body));
+    expect(out).toEqual({ messages: [], metadata: { user_id: "u_123" } });
   });
 });
