@@ -503,90 +503,27 @@ async function runChain(
         rawBody,
       );
       if (tier !== "anthropic") await rejectEmptyReply(tier, resp);
-      const headers = new Headers(resp.headers);
-      headers.set("x-fortune-llm-route", tier);
-      headers.set("x-fortune-llm-chain", chain.tiers.join(","));
-      headers.set("x-fortune-llm-reason", chain.reason);
-      if (errors.length > 0) {
-        headers.set("x-fortune-llm-prior-errors", formatPriorErrorsHeader(errors));
-      }
-      if (skipped.length > 0) {
-        headers.set("x-fortune-llm-skipped", formatSkippedHeader(skipped));
-      }
-      headers.set("access-control-allow-origin", "*");
-      headers.set("access-control-expose-headers", EXPOSE_HEADERS);
+      const headers = routeHeaders(resp, tier, chain, errors, skipped);
 
-      // Cache write: read the body so we can both store it and return
-      // it. Only cache 200 JSON responses — SSE responses (which only
-      // appear when caching was ineligible, i.e. !cacheEligible) skip
-      // this branch and stream through normally.
+      // Only cache 200 JSON responses — SSE responses (which only appear
+      // when caching was ineligible, i.e. !cacheEligible) skip this branch
+      // and stream through normally.
       if (
         cacheEligible &&
         cacheKey &&
         resp.status === 200 &&
         (resp.headers.get("content-type") ?? "").includes("application/json")
       ) {
-        const bodyText = await resp.text();
-        const modelLabel = headers.get("x-fortune-llm-model") ?? tier;
-        // For stream requests: parse before caching so we never persist a
-        // non-JSON body. A parse failure returns 502 without touching cache,
-        // letting the next identical request try a fresh upstream call.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let streamMsg: any = undefined;
-        if (wantsStream) {
-          try {
-            streamMsg = JSON.parse(bodyText);
-          } catch {
-            statsEvents.push({ kind: "error" });
-            flushStats();
-            return {
-              ok: true,
-              response: jsonError(
-                502,
-                "upstream_error",
-                `${tier} returned non-JSON body; cannot synthesize SSE stream`,
-              ),
-            };
-          }
-        }
-        const cacheEntry = {
-          body: bodyText,
-          tier,
-          model: modelLabel,
-          cachedAt: Date.now(),
-        };
-        if (cacheStub) {
-          await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
-        } else {
-          await writeCache(cacheKey, cacheEntry, cacheTtl, env.CIRCUIT);
-        }
-        if (wantsStream) {
-          const sseResp = synthesizeAnthropicSSE(streamMsg);
-          const sseHeaders = new Headers(sseResp.headers);
-          headers.forEach((v, k) => sseHeaders.set(k, v));
-          sseHeaders.set("content-type", "text/event-stream; charset=utf-8");
-          sseHeaders.set("x-fortune-llm-cache", "miss-stored-stream");
-          statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
-          flushStats();
-          return {
-            ok: true,
-            response: new Response(sseResp.body, {
-              status: 200,
-              headers: sseHeaders,
-            }),
-          };
-        }
-        headers.set("x-fortune-llm-cache", "miss-stored");
-        statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
+        const response = await storeAndRespond(resp, headers, tier, {
+          env,
+          cacheKey,
+          wantsStream,
+          cacheStub,
+          cacheTtl,
+          statsEvents,
+        });
         flushStats();
-        return {
-          ok: true,
-          response: new Response(bodyText, {
-            status: 200,
-            statusText: resp.statusText,
-            headers,
-          }),
-        };
+        return { ok: true, response };
       }
 
       if (cacheEligible) {
@@ -606,30 +543,121 @@ async function runChain(
     } catch (err) {
       const msg = errorMessage(err);
       console.error(`fortune-llm: tier ${tier} failed:`, msg);
-      errors.push({ tier, error: msg });
-      statsEvents.push({ kind: "tier_fail", tier });
-      // Trip the circuit on quota / rate-limit signals so subsequent
-      // requests skip this tier outright instead of repeatedly
-      // burning a fetch on a guaranteed failure.
       // Note: do NOT push to `skipped` here — this tier was actually tried
       // (it belongs in `errors`). `skipped` is reserved for tiers whose
       // circuit was already open at the top of this request loop.
-      if (tier !== "anthropic" && isQuotaError(err)) {
-        // A BYOK request exhausting the caller's own donated key must not
-        // disable this tier for all other users on the shared gateway pool.
-        if (!request.headers.get(`x-fortune-byok-${tier}`)) {
-          await tripCircuit(
-            tier,
-            env.CIRCUIT,
-            tripDurationFor(msg, tripDurationMs),
-            msg,
-          );
-        }
-      }
+      errors.push({ tier, error: msg });
+      statsEvents.push({ kind: "tier_fail", tier });
+      await tripOnQuota(tier, err, msg, request, env, tripDurationMs);
     }
   }
 
   return { ok: false, errors, skipped };
+}
+
+// Copies the tier's headers and adds the gateway's routing diagnostics.
+function routeHeaders(
+  resp: Response,
+  tier: BackendKind,
+  chain: RouteChain,
+  errors: Array<{ tier: BackendKind; error: string }>,
+  skipped: Array<{ tier: BackendKind; until: number }>,
+): Headers {
+  const headers = new Headers(resp.headers);
+  headers.set("x-fortune-llm-route", tier);
+  headers.set("x-fortune-llm-chain", chain.tiers.join(","));
+  headers.set("x-fortune-llm-reason", chain.reason);
+  if (errors.length > 0) {
+    headers.set("x-fortune-llm-prior-errors", formatPriorErrorsHeader(errors));
+  }
+  if (skipped.length > 0) {
+    headers.set("x-fortune-llm-skipped", formatSkippedHeader(skipped));
+  }
+  headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-expose-headers", EXPOSE_HEADERS);
+  return headers;
+}
+
+// Cache write: reads the body so it can be both stored and returned, as
+// JSON or (for stream requests) as SSE synthesized from that JSON.
+async function storeAndRespond(
+  resp: Response,
+  headers: Headers,
+  tier: BackendKind,
+  opts: {
+    env: Env;
+    cacheKey: string;
+    wantsStream: boolean;
+    cacheStub: CacheDOStub | null;
+    cacheTtl: number;
+    statsEvents: StatsEvent[];
+  },
+): Promise<Response> {
+  const { env, cacheKey, wantsStream, cacheStub, cacheTtl, statsEvents } = opts;
+  const bodyText = await resp.text();
+  const modelLabel = headers.get("x-fortune-llm-model") ?? tier;
+  // For stream requests: parse before caching so we never persist a
+  // non-JSON body. A parse failure returns 502 without touching cache,
+  // letting the next identical request try a fresh upstream call.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let streamMsg: any = undefined;
+  if (wantsStream) {
+    try {
+      streamMsg = JSON.parse(bodyText);
+    } catch {
+      statsEvents.push({ kind: "error" });
+      return jsonError(
+        502,
+        "upstream_error",
+        `${tier} returned non-JSON body; cannot synthesize SSE stream`,
+      );
+    }
+  }
+  const cacheEntry = {
+    body: bodyText,
+    tier,
+    model: modelLabel,
+    cachedAt: Date.now(),
+  };
+  if (cacheStub) {
+    await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
+  } else {
+    await writeCache(cacheKey, cacheEntry, cacheTtl, env.CIRCUIT);
+  }
+  if (wantsStream) {
+    const sseResp = synthesizeAnthropicSSE(streamMsg);
+    const sseHeaders = new Headers(sseResp.headers);
+    headers.forEach((v, k) => sseHeaders.set(k, v));
+    sseHeaders.set("content-type", "text/event-stream; charset=utf-8");
+    sseHeaders.set("x-fortune-llm-cache", "miss-stored-stream");
+    statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
+    return new Response(sseResp.body, { status: 200, headers: sseHeaders });
+  }
+  headers.set("x-fortune-llm-cache", "miss-stored");
+  statsEvents.push({ kind: "cache_miss" }, { kind: "tier_ok", tier });
+  return new Response(bodyText, {
+    status: 200,
+    statusText: resp.statusText,
+    headers,
+  });
+}
+
+// Trips the circuit on quota / rate-limit signals so subsequent requests
+// skip this tier outright instead of repeatedly burning a fetch on a
+// guaranteed failure.
+async function tripOnQuota(
+  tier: BackendKind,
+  err: unknown,
+  msg: string,
+  request: Request,
+  env: Env,
+  tripDurationMs: number,
+): Promise<void> {
+  if (tier === "anthropic" || !isQuotaError(err)) return;
+  // A BYOK request exhausting the caller's own donated key must not
+  // disable this tier for all other users on the shared gateway pool.
+  if (request.headers.get(`x-fortune-byok-${tier}`)) return;
+  await tripCircuit(tier, env.CIRCUIT, tripDurationFor(msg, tripDurationMs), msg);
 }
 
 // Builds the final 503 response after all chain tiers are exhausted.
