@@ -25,11 +25,10 @@
 import type {
   AnthropicMessagesRequest,
   AnthropicMessageResponse,
-  AnthropicResponseContentBlock,
   AnthropicStopReason,
   OpenAIToolCall,
 } from "./types.js";
-import { buildWorkersAiInput } from "./workers-ai.js";
+import { buildWorkersAiInput, toAnthropicContent } from "./workers-ai.js";
 import {
   messageStartEvent,
   parseSseDataLine,
@@ -201,23 +200,7 @@ export function openAIToAnthropicMessage(
   const text = typeof msg?.content === "string" ? msg.content : "";
   const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
 
-  const content: AnthropicResponseContentBlock[] = [];
-  if (text) {
-    content.push({ type: "text", text });
-  }
-  for (const tc of toolCalls) {
-    // Guard against malformed upstream responses where `function` is absent.
-    if (!tc.function) continue;
-    content.push({
-      type: "tool_use",
-      id: tc.id,
-      name: tc.function.name,
-      input: safeJsonParse(tc.function.arguments) ?? {},
-    });
-  }
-  if (content.length === 0) {
-    content.push({ type: "text", text: "" });
-  }
+  const content = toAnthropicContent(text, toolCalls);
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   let stopReason: AnthropicStopReason = "end_turn";
@@ -436,12 +419,4 @@ export function streamOpenAIAsAnthropic(
   });
 
   return sseResponse(downstream);
-}
-
-function safeJsonParse(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
 }

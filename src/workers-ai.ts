@@ -364,24 +364,7 @@ export function workersAiToAnthropicMessage(
 ): AnthropicMessageResponse {
   const { text, toolCalls } = extractWorkersAiContent(result);
 
-  const content: AnthropicResponseContentBlock[] = [];
-  if (text) {
-    content.push({ type: "text", text });
-  }
-  for (const tc of toolCalls) {
-    // Guard against malformed upstream responses where `function` is absent.
-    if (!tc.function) continue;
-    content.push({
-      type: "tool_use",
-      id: tc.id,
-      name: tc.function.name,
-      input: safeJsonParse(tc.function.arguments) ?? {},
-    });
-  }
-  // Anthropic SDK requires at least one content block even on empty responses.
-  if (content.length === 0) {
-    content.push({ type: "text", text: "" });
-  }
+  const content = toAnthropicContent(text, toolCalls);
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   const finishReason = result.choices?.[0]?.finish_reason;
@@ -415,6 +398,33 @@ export function workersAiToAnthropicMessage(
       output_tokens: completionTokens,
     },
   };
+}
+
+// Builds Anthropic content blocks from an OpenAI-shaped reply's text and
+// tool calls, shared by every OpenAI-compatible translator.
+export function toAnthropicContent(
+  text: string,
+  toolCalls: OpenAIToolCall[],
+): AnthropicResponseContentBlock[] {
+  const content: AnthropicResponseContentBlock[] = [];
+  if (text) {
+    content.push({ type: "text", text });
+  }
+  for (const tc of toolCalls) {
+    // Guard against malformed upstream responses where `function` is absent.
+    if (!tc.function) continue;
+    content.push({
+      type: "tool_use",
+      id: tc.id,
+      name: tc.function.name,
+      input: safeJsonParse(tc.function.arguments) ?? {},
+    });
+  }
+  // Anthropic SDK requires at least one content block even on empty responses.
+  if (content.length === 0) {
+    content.push({ type: "text", text: "" });
+  }
+  return content;
 }
 
 function safeJsonParse(s: string): unknown {
