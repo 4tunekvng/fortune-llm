@@ -363,6 +363,24 @@ function validateMessages(
       "Field 'messages' must not be empty.",
     );
   }
+  // Routing and every translator read `m.content` and `block.type`, so a
+  // null entry would throw out of the handler instead of returning a 400.
+  const isBlock = (b: unknown) => typeof b === "object" && b !== null;
+  const badMessage = parsed.messages.some(
+    (m) =>
+      !isBlock(m) ||
+      (typeof m.content !== "string" &&
+        !(Array.isArray(m.content) && m.content.every(isBlock))),
+  );
+  const badSystem =
+    Array.isArray(parsed.system) && !parsed.system.every(isBlock);
+  if (badMessage || badSystem) {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      "Each message needs string or array content of block objects.",
+    );
+  }
   if (
     typeof parsed.max_tokens !== "number" ||
     !Number.isFinite(parsed.max_tokens) ||

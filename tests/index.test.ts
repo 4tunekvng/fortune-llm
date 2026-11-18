@@ -123,3 +123,80 @@ describe("fetch handler with the paid fallback configured", () => {
     expect(resp.headers.get("x-fortune-llm-reason")).toMatch(/last-resort/);
   });
 });
+
+describe("fetch handler with malformed message entries", () => {
+  const env = {
+    GATEWAY_TOKEN: "gateway-token",
+    CACHE_TTL_SECONDS: "0",
+    RATE_LIMIT_PER_MIN: "0",
+    AI: { run: async () => ({ response: "unexpected model call" }) },
+  };
+  const send = (body: unknown) =>
+    worker.fetch(
+      new Request("https://gw.test/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": "gateway-token" },
+        body: JSON.stringify(body),
+      }),
+      env as never,
+      ctx as never,
+    );
+
+  it("answers 400 for a null message instead of throwing", async () => {
+    // Act
+    const resp = await send({ model: "m", max_tokens: 8, messages: [null] });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("answers 400 for a null content block", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      messages: [{ role: "user", content: [null] }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("answers 400 for a message with no content", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      messages: [{ role: "user" }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("answers 400 for a null system block", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      system: [null],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("still serves block-array content", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      system: [{ type: "text", text: "be brief" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(200);
+  });
+});
