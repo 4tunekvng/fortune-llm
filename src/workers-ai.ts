@@ -588,11 +588,23 @@ export function streamWorkersAiAsAnthropic(
   return sseResponse(downstream);
 }
 
+/**
+ * The text in one streamed Workers AI frame. Older models send
+ * `{"response": "..."}`; newer ones (Gemma 4, the default) send OpenAI-style
+ * `{"choices": [{"delta": {"content": "..."}}]}`, the streamed twin of the
+ * `choices` shape `WorkersAiChatResponse` already reads. `delta.reasoning` is
+ * the model's private thinking and is never passed on as reply text.
+ */
 export function extractWorkersAiDelta(jsonPayload: string): string | null {
   if (!jsonPayload) return null;
   try {
-    const obj = JSON.parse(jsonPayload) as { response?: unknown };
+    const obj = JSON.parse(jsonPayload) as {
+      response?: unknown;
+      choices?: Array<{ delta?: { content?: unknown } }>;
+    };
     if (typeof obj.response === "string") return obj.response;
+    const content = obj.choices?.[0]?.delta?.content;
+    if (typeof content === "string") return content;
   } catch {
     // ignore
   }

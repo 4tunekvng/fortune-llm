@@ -346,6 +346,20 @@ describe("extractWorkersAiDelta", () => {
   it("returns null when response is not a string", () => {
     expect(extractWorkersAiDelta('{"response": 42}')).toBe(null);
   });
+
+  it("reads the OpenAI-style delta that Gemma 4 streams", () => {
+    const frame =
+      '{"object":"chat.completion.chunk","choices":[{"index":0,' +
+      '"delta":{"content":"Pick one thing."},"finish_reason":null}]}';
+
+    expect(extractWorkersAiDelta(frame)).toBe("Pick one thing.");
+  });
+
+  it("never passes on the model's reasoning as reply text", () => {
+    const frame = '{"choices":[{"index":0,"delta":{"reasoning":"   Goal"}}]}';
+
+    expect(extractWorkersAiDelta(frame)).toBe(null);
+  });
 });
 
 describe("buildWorkersAiInput — image block translation", () => {
@@ -448,6 +462,22 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text).toContain('"stop_reason":"end_turn"');
     expect(text).toContain('"usage":{"output_tokens":4}');
     expect(text.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+  });
+
+  it("streams the text of a Gemma 4 reply, skipping its reasoning", async () => {
+    // Frames as @cf/google/gemma-4-26b-a4b-it sent them on 2026-11-19.
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"reasoning":"   Goal"}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"content":"Hello there"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text.match(/event: content_block_delta/g)).toHaveLength(1);
+    expect(text).toContain('"text":"Hello there"');
+    expect(text).not.toContain("Goal");
   });
 
   it("reassembles a frame split across chunks", async () => {
