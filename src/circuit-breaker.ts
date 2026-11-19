@@ -14,12 +14,13 @@
  * when the circuit closes — but the `until` field is still the source of
  * truth on every read so we never serve a stale-but-not-yet-purged entry.
  *
- * Heuristic for tripping: `isQuotaError` matches quota / rate-limit
- * signals on the error message string (Gemini's `RESOURCE_EXHAUSTED`,
- * HTTP 429, "rate limit", "quota", "exceeded"). Transient 5xx and
- * network errors are intentionally NOT tripped — they're worth retrying.
+ * What trips it (`tripMsFor`): a provider's HTTP status when it has one
+ * (`UpstreamError`), else quota / rate-limit wording in the message (the
+ * Workers AI binding has no status). Transient 5xx and network errors are
+ * intentionally NOT tripped — they're worth retrying.
  */
 import type { BackendKind } from "./route.js";
+import { UpstreamError } from "./upstream-error.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 export const DEFAULT_TRIP_DURATION_MS = HOUR_MS; // 1h
@@ -37,11 +38,10 @@ export interface CircuitState {
 }
 
 /**
- * Pattern-match a thrown error to decide whether it signals quota or
- * rate-limit exhaustion (vs. a transient 5xx / network blip). Both
- * Workers AI and Gemini surface these as exceptions from their SDK
- * wrappers, so we read the `.message` (or the stringified error) and
- * look for the canonical signals each provider emits.
+ * Decide whether a thrown error signals quota or rate-limit exhaustion
+ * (vs. a transient 5xx / network blip). A provider HTTP error answers by
+ * its status (429); errors without one (the Workers AI binding) are read
+ * from the `.message` for the canonical signals each provider emits.
  *
  * True-positives:
  *   - Gemini:     "RESOURCE_EXHAUSTED", "429 Too Many Requests"
@@ -53,6 +53,9 @@ export interface CircuitState {
  * next request — they're transient, not a quota signal.
  */
 export function isQuotaError(error: unknown): boolean {
+  // A provider's HTTP status says it outright; 403 can be a quota or a
+  // refusal, so only its wording decides.
+  if (error instanceof UpstreamError && error.status !== 403) return error.status === 429;
   const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
   if (!msg) return false;
 
@@ -164,7 +167,7 @@ export const AMBIGUOUS_TRIP_MS = 2 * 60 * 1000;
 export function tripDurationFor(error: unknown, longMs: number): number {
   const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
   // A stated window wins: Groq's per-minute 413 also links "settings/billing".
-  const perDay = /per\s*-?\s*day|perday|daily|\brpd\b|neurons exhausted|neuron limit/.test(msg);
+  const perDay = statesDailyLimit(msg);
   const short =
     /per\s*-?\s*(minute|second)|perminute|persecond|\b(tpm|rpm|rps)\b|try again in|retry\s*-?\s*(after|delay)|retrydelay/.test(msg);
   if (perDay || (!short && /payment|billing|credits|insufficient/.test(msg))) return longMs;
@@ -179,6 +182,39 @@ export function tripDurationFor(error: unknown, longMs: number): number {
     if (total > 0) ms = total + 1000;
   }
   return Math.min(longMs, Math.max(SHORT_TRIP_MIN_MS, Math.min(SHORT_TRIP_MAX_MS, ms)));
+}
+
+/**
+ * How long a failed call should keep its tier's circuit open, or 0 to leave
+ * it closed. Statuses decide first: 401/402 (bad key, no credit) last the
+ * whole window; 400/404/413 belong to that one request and 5xx is a blip,
+ * so they never trip; a 429's Retry-After header is the provider's own
+ * answer, unless the message names a daily limit, which lasts the whole
+ * window however soon the header says to retry. Errors without a status (the Workers AI binding, a network
+ * failure) still fall back to reading the message.
+ */
+export function tripMsFor(error: unknown, longMs: number): number {
+  if (error instanceof UpstreamError) {
+    if (error.status === 401 || error.status === 402) return longMs;
+    if (error.status === 429 && error.retryAfterMs !== undefined && !statesDailyLimit(error.message)) {
+      return Math.min(longMs, Math.max(SHORT_TRIP_MIN_MS, error.retryAfterMs + 1000));
+    }
+  }
+  return isQuotaError(error) ? tripDurationFor(error, longMs) : 0;
+}
+
+/** The message names a daily limit, which only a new day resets. */
+function statesDailyLimit(msg: string): boolean {
+  return /per\s*-?\s*day|perday|daily|\brpd\b|neurons exhausted|neuron limit/i.test(msg);
+}
+
+/**
+ * A failure that belongs to the key that made the call (its quota, a bad
+ * key, no credit), so another key for the same provider may still work.
+ */
+export function isKeyError(error: unknown): boolean {
+  if (error instanceof UpstreamError && (error.status === 401 || error.status === 402)) return true;
+  return isQuotaError(error);
 }
 
 /**

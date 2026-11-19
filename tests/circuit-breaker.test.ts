@@ -6,7 +6,9 @@ import {
   resolveTripDurationMs,
   tripCircuit,
   tripDurationFor,
+  tripMsFor,
 } from "../src/circuit-breaker.js";
+import { UpstreamError } from "../src/upstream-error.js";
 
 class FakeKv {
   private store = new Map<string, { value: string; expiresAt: number | null }>();
@@ -266,5 +268,26 @@ describe("tripDurationFor", () => {
 
   it("never exceeds the configured window", () => {
     expect(tripDurationFor("Mistral 429 Rate limit exceeded", 60 * 1000)).toBe(60 * 1000);
+  });
+});
+
+describe("tripMsFor", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  it("keeps a stated daily limit for the whole window despite a short Retry-After", () => {
+    const err = new UpstreamError("OpenRouter", 429, "Rate limit exceeded: free-models-per-day", 60_000);
+
+    expect(tripMsFor(err, HOUR)).toBe(HOUR);
+  });
+
+  it("trips a bad key or an empty account for the whole window", () => {
+    expect(tripMsFor(new UpstreamError("Mistral", 401, "Unauthorized"), HOUR)).toBe(HOUR);
+    expect(tripMsFor(new UpstreamError("Cerebras", 402, "Payment Required"), HOUR)).toBe(HOUR);
+  });
+
+  it("never trips on a server error, even one that mentions a rate limit", () => {
+    const err = new UpstreamError("Groq", 503, "upstream rate limit service unavailable");
+
+    expect(tripMsFor(err, HOUR)).toBe(0);
   });
 });

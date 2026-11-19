@@ -188,8 +188,9 @@ that tier entirely.
 
 | Behavior | Detail |
 |---|---|
-| Trip signals | `RESOURCE_EXHAUSTED` (Gemini), `429`, `rate limit`, `quota`, `neurons exhausted`, `daily limit exceeded` |
-| Not tripped | Timeouts, transient 5xx, network errors, `max_tokens exceeded` (those still retry) |
+| Trip signals (HTTP providers) | Judged by status. `401` / `402` (bad key, no credit): the whole window. `429`: as long as `Retry-After` says, else by the message's stated window. `403`: only when its message names a quota. |
+| Trip signals (no status) | Workers AI binding and other status-less errors: `RESOURCE_EXHAUSTED`, `429`, `rate limit`, `quota`, `neurons exhausted`, `daily limit exceeded` in the message |
+| Not tripped | `400`, `404`, `413` (that one request is the problem), `5xx`, timeouts, network errors, `max_tokens exceeded` |
 | Default open duration | 1 hour. Override via `[vars] CIRCUIT_TRIP_DURATION_MS = "1800000"` (30 min). Capped at 24h. |
 | Anthropic tier | Never circuit-gated — it's explicitly opt-in and paid, the user asked for it. |
 | KV unbound | Breaker no-ops with a one-time warning; behavior reverts to the old retry-every-time chain. |
