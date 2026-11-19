@@ -492,3 +492,132 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text).not.toContain("message_stop");
   });
 });
+
+describe("buildWorkersAiInput — message translation edge cases", () => {
+  const build = (messages: AnthropicMessagesRequest["messages"]) =>
+    buildWorkersAiInput({ model: "claude-sonnet-5", max_tokens: 64, messages })
+      .messages;
+
+  it("joins array tool_result text parts and drops non-text parts", () => {
+    const out = build([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "text", text: "a" }, { type: "image" }, { text: "b" }],
+          },
+        ],
+      },
+    ]);
+
+    expect(out).toEqual([{ role: "tool", tool_call_id: "t1", content: "a\n\nb" }]);
+  });
+
+  it("serializes object tool_result content and empties missing content", () => {
+    const out = build([
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: { ok: true } },
+          { type: "tool_result", tool_use_id: "t2", content: null },
+        ],
+      },
+    ]);
+
+    expect(out).toEqual([
+      { role: "tool", tool_call_id: "t1", content: '{"ok":true}' },
+      { role: "tool", tool_call_id: "t2", content: "" },
+    ]);
+  });
+
+  it("puts the user text before the tool messages of the same turn", () => {
+    const out = build([
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "r" },
+          { type: "text", text: "next" },
+        ],
+      },
+    ]);
+
+    expect(out).toEqual([
+      { role: "user", content: "next" },
+      { role: "tool", tool_call_id: "t1", content: "r" },
+    ]);
+  });
+
+  it("keeps string tool_use input and defaults missing input to {}", () => {
+    const out = build([
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "a", name: "f", input: '{"x":1}' },
+          { type: "tool_use", id: "b", name: "g", input: undefined },
+        ],
+      },
+    ]);
+
+    expect(out).toEqual([
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "a", type: "function", function: { name: "f", arguments: '{"x":1}' } },
+          { id: "b", type: "function", function: { name: "g", arguments: "{}" } },
+        ],
+      },
+    ]);
+  });
+
+  it("drops an assistant turn with no text and no tool calls", () => {
+    const out = build([{ role: "assistant", content: [{ type: "text", text: "" }] }]);
+
+    expect(out).toEqual([]);
+  });
+
+  it("ignores role-mismatched blocks", () => {
+    const out = build([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "hi" },
+          { type: "image", source: { type: "base64", data: "x" } },
+          { type: "tool_result", tool_use_id: "t", content: "r" },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_use", id: "a", name: "f", input: {} }],
+      },
+    ]);
+
+    expect(out).toEqual([{ role: "assistant", content: "hi" }]);
+  });
+
+  it("defaults image media type to jpeg and skips unusable image sources", () => {
+    const out = build([
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", data: "x" } },
+          { type: "image", source: { type: "image_url", url: "https://e.com/p" } },
+          { type: "image", source: { type: "url" } },
+          { type: "image", source: { type: "file", data: "y" } },
+        ],
+      },
+    ]);
+
+    expect(out).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,x" } },
+          { type: "image_url", image_url: { url: "https://e.com/p" } },
+        ],
+      },
+    ]);
+  });
+});
