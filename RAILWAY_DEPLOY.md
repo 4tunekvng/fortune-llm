@@ -33,7 +33,6 @@ In the project's **Variables → Volume** section (or the **+ Volume** button):
 Apps that need this:
 | Repo | Env var to set | Value |
 |---|---|---|
-| `delegate` | `DATABASE_PATH` | `/data/delegate.db` |
 | `knowledge-compounder` | `DATABASE_PATH` | `/data/knowledge.db` |
 | `weekend-cofounder` | `WC_DB_PATH` | `/data/cofounder.db` |
 | `network-agent` (server only) | `NETWORK_DB_PATH` | `/data/network.db` |
@@ -61,7 +60,7 @@ App-specific extras:
 ### Stage 4 — Generate a public domain
 
 1. **Settings → Networking → Public Networking → Generate Domain**.
-2. Railway prints a URL like `delegate-production-abc.up.railway.app`.
+2. Railway prints a URL like `knowledge-compounder-production-abc.up.railway.app`.
 3. The deploy redeploys with the public domain. ~30s.
 
 ### Stage 5 — Initialize the SQLite file (first deploy only)
@@ -82,7 +81,6 @@ Railway doesn't gate by default, but if you see a login page when opening in inc
 | `apertus` | Vercel | — (Postgres add-on) | `POSTGRES_PRISMA_URL` | — |
 | `lena_agent` | Vercel | — | — | `LENA_API_BASE_URL` |
 | `maestro` | Vercel | — | — | — |
-| `delegate` | Railway | `/data` | `DATABASE_PATH=/data/delegate.db` | — |
 | `knowledge-compounder` | Railway | `/data` | `DATABASE_PATH=/data/knowledge.db` | — |
 | `weekend-cofounder` | Railway | `/data` | `WC_DB_PATH=/data/cofounder.db` | `GITHUB_TOKEN`, `WC_TEST_MODE=0` |
 | `network-agent` (server) | Railway | `/data` | `NETWORK_DB_PATH=/data/network.db` | (web hosted separately on Vercel) |
