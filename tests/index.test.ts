@@ -247,4 +247,27 @@ describe("fetch handler with the development token", () => {
 
     expect(resp.status).toBe(403);
   });
+
+  it("never falls back to paid Anthropic when free tiers fail", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "m1", content: [{ type: "text", text: "paid" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const noFreeEnv = { ...env, AI: undefined };
+      const resp = await worker.fetch(
+        requestWith("dev-token"),
+        noFreeEnv as never,
+        ctx as never,
+      );
+
+      expect(resp.status).toBe(503);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

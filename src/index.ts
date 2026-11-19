@@ -916,7 +916,7 @@ export default {
       cacheEligible && wantsStream ? { ...parsed, stream: false } : parsed;
 
     const chain: RouteChain = decideRoute(parsed, {
-      anthropicFallback: Boolean(env.ANTHROPIC_API_KEY),
+      anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
     });
 
     if (!env.CIRCUIT && !circuitMissingWarned) {
