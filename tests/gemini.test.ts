@@ -131,6 +131,7 @@ describe("buildGeminiInput", () => {
     expect(assistantMsg?.role).toBe("model");
     expect(assistantMsg?.parts).toContainEqual({
       functionCall: { name: "get_weather", args: { city: "Paris" } },
+      thoughtSignature: "skip_thought_signature_validator",
     });
     const toolResultMsg = out.contents[2];
     // functionResponse.name must be the tool name (looked up from the
@@ -138,6 +139,45 @@ describe("buildGeminiInput", () => {
     expect(toolResultMsg?.parts[0]).toMatchObject({
       functionResponse: { name: "get_weather", response: { result: "Sunny, 22C" } },
     });
+  });
+
+  // Gemini 3+ rejects a replayed functionCall without a thought
+  // signature (400 "missing a thought_signature"). Replayed calls may
+  // come from any tier, so the gateway marks the first call of each
+  // model step with Google's documented skip value; parallel calls
+  // after it carry none, as in Google's own replies.
+  it("signs only the first replayed functionCall of each model step", () => {
+    const out = buildGeminiInput(
+      baseReq({
+        messages: [
+          { role: "user", content: "plan it" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "t1", name: "read_circle", input: {} },
+              { type: "tool_use", id: "t2", name: "read_calendar", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "crew" },
+              { type: "tool_result", tool_use_id: "t2", content: "free" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const parts = out.contents[1]?.parts;
+
+    expect(parts).toEqual([
+      {
+        functionCall: { name: "read_circle", args: {} },
+        thoughtSignature: "skip_thought_signature_validator",
+      },
+      { functionCall: { name: "read_calendar", args: {} } },
+    ]);
   });
 });
 

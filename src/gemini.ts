@@ -38,6 +38,11 @@ import {
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+/**
+ * Google's documented stand-in for a function call it did not generate:
+ * https://ai.google.dev/gemini-api/docs/thought-signatures (FAQ 1).
+ */
+const REPLAYED_CALL_SIGNATURE = "skip_thought_signature_validator";
 /** Tried in order after DEFAULT_GEMINI_MODEL's free quota is spent. */
 export const DEFAULT_GEMINI_FALLBACK_MODELS = "gemini-flash-lite-latest,gemini-flash-latest";
 
@@ -301,7 +306,17 @@ function translateMessageToGemini(m: AnthropicMessage, toolNameById: Map<string,
           typeof tu.input === "object" && tu.input !== null
             ? (tu.input as Record<string, unknown>)
             : {};
-        parts.push({ functionCall: { name: tu.name, args } });
+        // Gemini 3+ answers 400 when the first replayed call of a model
+        // step has no thought signature. The real one is lost in the
+        // Anthropic format (and other tiers never had one), so send
+        // Google's documented skip value on that first call only.
+        const first = !parts.some((p) => "functionCall" in p);
+        const functionCall = { name: tu.name, args };
+        parts.push(
+          first
+            ? { functionCall, thoughtSignature: REPLAYED_CALL_SIGNATURE }
+            : { functionCall },
+        );
       } else if (block.type === "tool_result") {
         const tr = block as { tool_use_id: string; content: unknown };
         let response: Record<string, unknown>;

@@ -195,7 +195,10 @@ export interface GeminiContent {
 export type GeminiPart =
   | { text: string }
   | { inlineData: { mimeType: string; data: string } }
-  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | {
+      functionCall: { name: string; args: Record<string, unknown> };
+      thoughtSignature?: string;
+    }
   | { functionResponse: { name: string; response: Record<string, unknown> } };
 
 export interface GeminiFunctionDeclaration {
