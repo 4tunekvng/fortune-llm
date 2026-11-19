@@ -423,7 +423,7 @@ export function toAnthropicContent(
       type: "tool_use",
       id: tc.id,
       name: tc.function.name,
-      input: safeJsonParse(tc.function.arguments) ?? {},
+      input: safeJsonObject(tc.function.arguments),
     });
   }
   // Anthropic SDK requires at least one content block even on empty responses.
@@ -433,11 +433,15 @@ export function toAnthropicContent(
   return content;
 }
 
-function safeJsonParse(s: string): unknown {
+function safeJsonObject(s: string): Record<string, unknown> {
   try {
-    return JSON.parse(s);
+    const parsed: unknown = JSON.parse(s);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return {};
   } catch {
-    return null;
+    return {};
   }
 }
 

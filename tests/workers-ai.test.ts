@@ -262,6 +262,25 @@ describe("workersAiToAnthropicMessage", () => {
     ]);
   });
 
+  it("coerces non-object tool_calls arguments to an empty object", () => {
+    const msg = workersAiToAnthropicMessage(
+      {
+        tool_calls: [
+          { id: "call_str", type: "function", function: { name: "f", arguments: '"hello"' } },
+          { id: "call_arr", type: "function", function: { name: "g", arguments: "[1, 2]" } },
+          { id: "call_num", type: "function", function: { name: "h", arguments: "42" } },
+        ],
+      },
+      "claude-sonnet-5",
+      { messages: [{ role: "user", content: "call" }], max_tokens: 100 },
+    );
+    expect(msg.content).toEqual([
+      { type: "tool_use", id: "call_str", name: "f", input: {} },
+      { type: "tool_use", id: "call_arr", name: "g", input: {} },
+      { type: "tool_use", id: "call_num", name: "h", input: {} },
+    ]);
+  });
+
   it("estimates tokens when Workers AI omits usage", () => {
     const msg = workersAiToAnthropicMessage(
       { response: "abcd".repeat(10) },
