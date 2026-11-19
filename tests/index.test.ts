@@ -200,3 +200,51 @@ describe("fetch handler with malformed message entries", () => {
     expect(resp.status).toBe(200);
   });
 });
+
+describe("fetch handler with the development token", () => {
+  const env = {
+    GATEWAY_TOKEN: "gateway-token",
+    GATEWAY_DEV_TOKEN: "dev-token",
+    ANTHROPIC_API_KEY: "sk-ant-test",
+    CACHE_TTL_SECONDS: "0",
+    RATE_LIMIT_PER_MIN: "0",
+    AI: { run: async () => ({ response: "hello from workers ai" }) },
+  };
+
+  function requestWith(token: string, route?: string): Request {
+    return new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": token, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+        ...(route ? { metadata: { fortune_route: route } } : {}),
+      }),
+    });
+  }
+
+  it("answers on the free route", async () => {
+    const resp = await worker.fetch(requestWith("dev-token"), env as never, ctx as never);
+
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+  });
+
+  it("is refused for paid Anthropic", async () => {
+    const resp = await worker.fetch(
+      requestWith("dev-token", "anthropic"),
+      env as never,
+      ctx as never,
+    );
+
+    expect(resp.status).toBe(403);
+    expect(await resp.text()).toContain("development token");
+  });
+
+  it("leaves an unknown token refused", async () => {
+    const resp = await worker.fetch(requestWith("other"), env as never, ctx as never);
+
+    expect(resp.status).toBe(403);
+  });
+});
