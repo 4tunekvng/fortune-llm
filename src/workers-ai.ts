@@ -11,10 +11,7 @@
  *     directions including tool_result follow-ups
  *   - streaming for the text path; tool-call responses are synthesized
  *     into Anthropic SSE shape from a buffered non-streamed call
- *
- * What this still does NOT cover (router routes these to Gemini):
- *   - images (vision) — Gemma 4 supports vision but image-block translation
- *     from Anthropic format is not yet implemented here
+ *   - images on user turns, sent as OpenAI vision content parts
  */
 
 import type {
@@ -55,21 +52,29 @@ export function flattenContent(content: AnthropicMessage["content"]): string {
         return (block as { text: string }).text;
       }
       if (block.type === "tool_result") {
-        const tr = block as { content?: unknown };
-        if (typeof tr.content === "string") return tr.content;
-        if (Array.isArray(tr.content)) {
-          return tr.content
-            .map((c) =>
-              typeof c === "object" && c && "text" in c && typeof (c as { text: unknown }).text === "string"
-                ? (c as { text: string }).text
-                : "",
-            )
-            .join("\n");
-        }
+        return toolResultText((block as { content?: unknown }).content) ?? "";
       }
       return "";
     })
     .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Text of a tool_result's content: a string as is, an array as its text
+ * parts joined by newlines (other parts become empty lines). null for any
+ * other shape, so each caller picks its own fallback.
+ */
+function toolResultText(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  return content
+    .map((c) =>
+      typeof c === "object" && c && "text" in c &&
+      typeof (c as { text: unknown }).text === "string"
+        ? (c as { text: string }).text
+        : "",
+    )
     .join("\n");
 }
 
@@ -179,7 +184,6 @@ function translateMessage(m: AnthropicMessage): WorkersAiChatMessage[] {
     return [{ role: m.role, content: m.content }];
   }
 
-  const out: WorkersAiChatMessage[] = [];
   const textBuf: string[] = [];
   const imageBuf: WorkersAiContentBlock[] = [];
   const toolCalls: OpenAIToolCall[] = [];
@@ -189,77 +193,79 @@ function translateMessage(m: AnthropicMessage): WorkersAiChatMessage[] {
     if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
       textBuf.push((block as { text: string }).text);
     } else if (block.type === "image" && m.role === "user") {
-      const src = (block as { source: AnthropicImageSource }).source;
-      let url: string;
-      if (src.type === "base64" && src.data) {
-        url = `data:${src.media_type ?? "image/jpeg"};base64,${src.data}`;
-      } else if ((src.type === "url" || src.type === "image_url") && src.url) {
-        url = src.url;
-      } else {
-        // Unrecognised source shape — skip to avoid a broken request.
-        continue;
-      }
-      imageBuf.push({ type: "image_url", image_url: { url } });
+      const url = imageUrl((block as { source: AnthropicImageSource }).source);
+      // Unrecognised source shape — skip to avoid a broken request.
+      if (url) imageBuf.push({ type: "image_url", image_url: { url } });
     } else if (block.type === "tool_use" && m.role === "assistant") {
-      const tu = block as { id: string; name: string; input: unknown };
-      toolCalls.push({
-        id: tu.id,
-        type: "function",
-        function: {
-          name: tu.name,
-          arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}),
-        },
-      });
+      toolCalls.push(toOpenAIToolCall(block as ToolUseBlock));
     } else if (block.type === "tool_result" && m.role === "user") {
-      const tr = block as { tool_use_id: string; content: unknown };
-      let body = "";
-      if (typeof tr.content === "string") {
-        body = tr.content;
-      } else if (Array.isArray(tr.content)) {
-        body = tr.content
-          .map((c) =>
-            typeof c === "object" && c && "text" in c && typeof (c as { text: unknown }).text === "string"
-              ? (c as { text: string }).text
-              : "",
-          )
-          .join("\n");
-      } else if (tr.content != null) {
-        body = JSON.stringify(tr.content);
-      }
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: tr.tool_use_id,
-        content: body,
-      });
+      toolMessages.push(toToolMessage(block as ToolResultBlock));
     }
   }
 
   const textJoined = textBuf.join("\n");
+  if (m.role === "assistant") return assistantMessages(textJoined, toolCalls);
+  return [...userMessages(textJoined, imageBuf), ...toolMessages];
+}
 
-  if (m.role === "assistant") {
-    if (textJoined || toolCalls.length > 0) {
-      out.push({
-        role: "assistant",
-        content: textJoined,
-        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-      });
-    }
-  } else {
-    // User messages with images use the multi-part content array (OpenAI
-    // vision format). Pure-text messages stay as a plain string so non-
-    // vision models are unaffected.
-    if (imageBuf.length > 0) {
-      const parts: WorkersAiContentBlock[] = [];
-      if (textJoined) parts.push({ type: "text", text: textJoined });
-      parts.push(...imageBuf);
-      out.push({ role: "user", content: parts });
-    } else if (textJoined) {
-      out.push({ role: "user", content: textJoined });
-    }
-    out.push(...toolMessages);
+/** Data URL for base64 sources, the URL itself for URL sources, else null. */
+function imageUrl(src: AnthropicImageSource): string | null {
+  if (src.type === "base64" && src.data) {
+    return `data:${src.media_type ?? "image/jpeg"};base64,${src.data}`;
   }
+  if ((src.type === "url" || src.type === "image_url") && src.url) return src.url;
+  return null;
+}
 
-  return out;
+type ToolUseBlock = { id: string; name: string; input: unknown };
+type ToolResultBlock = { tool_use_id: string; content: unknown };
+
+function toOpenAIToolCall(tu: ToolUseBlock): OpenAIToolCall {
+  return {
+    id: tu.id,
+    type: "function",
+    function: {
+      name: tu.name,
+      arguments:
+        typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}),
+    },
+  };
+}
+
+function toToolMessage(tr: ToolResultBlock): WorkersAiChatMessage {
+  const fallback = tr.content != null ? JSON.stringify(tr.content) : "";
+  const body = toolResultText(tr.content) ?? fallback;
+  return { role: "tool", tool_call_id: tr.tool_use_id, content: body };
+}
+
+function assistantMessages(
+  text: string,
+  toolCalls: OpenAIToolCall[],
+): WorkersAiChatMessage[] {
+  if (!text && toolCalls.length === 0) return [];
+  return [
+    {
+      role: "assistant",
+      content: text,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    },
+  ];
+}
+
+/**
+ * User messages with images use the multi-part content array (OpenAI
+ * vision format). Pure-text messages stay as a plain string so non-vision
+ * models are unaffected.
+ */
+function userMessages(
+  text: string,
+  images: WorkersAiContentBlock[],
+): WorkersAiChatMessage[] {
+  if (images.length > 0) {
+    const parts: WorkersAiContentBlock[] = text ? [{ type: "text", text }] : [];
+    return [{ role: "user", content: [...parts, ...images] }];
+  }
+  return text ? [{ role: "user", content: text }] : [];
 }
 
 function clampMaxTokens(requested: number): number {
