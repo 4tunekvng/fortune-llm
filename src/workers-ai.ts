@@ -342,7 +342,7 @@ export async function callWorkersAi(
  * return the simpler `{response, tool_calls}` shape. Both are valid;
  * the gateway must handle either.
  */
-export function extractWorkersAiContent(result: WorkersAiChatResponse): {
+function extractWorkersAiContent(result: WorkersAiChatResponse): {
   text: string;
   toolCalls: OpenAIToolCall[];
 } {
@@ -452,7 +452,7 @@ function estimatePromptTokens(input: WorkersAiChatRequest): number {
  * tool_use content block per tool call, with the full args as a single
  * input_json_delta. Same event vocabulary the SDK expects.
  */
-export function synthesizeToolStream(
+function synthesizeToolStream(
   result: WorkersAiChatResponse,
   modelLabel: string,
 ): Response {

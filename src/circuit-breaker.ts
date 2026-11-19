@@ -149,10 +149,10 @@ export async function tripCircuit(
 }
 
 /** Floor and ceiling for a short (per-second / per-minute) trip. */
-export const SHORT_TRIP_MIN_MS = 30 * 1000;
-export const SHORT_TRIP_MAX_MS = 5 * 60 * 1000;
+const SHORT_TRIP_MIN_MS = 30 * 1000;
+const SHORT_TRIP_MAX_MS = 5 * 60 * 1000;
 /** A bare 429 that doesn't say which window it hit. */
-export const AMBIGUOUS_TRIP_MS = 2 * 60 * 1000;
+const AMBIGUOUS_TRIP_MS = 2 * 60 * 1000;
 
 /**
  * How long to keep a tier's circuit open for this quota error. Every 429

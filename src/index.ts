@@ -1138,7 +1138,7 @@ const EXPOSE_HEADERS =
  * Control characters make `Headers.set` throw, which would discard the
  * successful tier's response, so collapse them to spaces.
  */
-export function formatPriorErrorsHeader(
+function formatPriorErrorsHeader(
   errors: Array<{ tier: BackendKind; error: string }>,
 ): string {
   return errors
