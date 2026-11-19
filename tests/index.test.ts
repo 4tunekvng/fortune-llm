@@ -271,3 +271,40 @@ describe("fetch handler with the development token", () => {
     }
   });
 });
+
+describe("fetch handler when CACHE_DO RPC fails", () => {
+  it("falls back to an uncached upstream response on read/write error", async () => {
+    const failingStub = {
+      read: vi.fn().mockRejectedValue(new Error("DO reset")),
+      write: vi.fn().mockRejectedValue(new Error("DO write failed")),
+    };
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      CACHE_TTL_SECONDS: "60",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "ok despite cache error" }) },
+      CACHE_DO: {
+        idFromName: () => "id",
+        get: () => failingStub,
+      },
+    };
+
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { fortune_cache: true },
+      }),
+    });
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as { content: Array<{ text: string }> };
+    expect(body.content[0]?.text).toBe("ok despite cache error");
+    expect(failingStub.read).toHaveBeenCalledTimes(1);
+    expect(failingStub.write).toHaveBeenCalledTimes(1);
+  });
+});

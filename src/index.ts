@@ -423,9 +423,16 @@ async function lookupAndServeCache(
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Promise<Response | null> {
-  const cached = cacheStub
-    ? await cacheStub.read(cacheKey)
-    : await readCache(cacheKey, envCircuit);
+  let cached = null;
+  if (cacheStub) {
+    try {
+      cached = await cacheStub.read(cacheKey);
+    } catch (err) {
+      console.warn("fortune-llm: CACHE_DO read failed:", errorMessage(err));
+    }
+  } else {
+    cached = await readCache(cacheKey, envCircuit);
+  }
   if (!cached) return null;
 
   const cacheAge = Math.floor((Date.now() - cached.cachedAt) / 1000);
@@ -644,7 +651,11 @@ async function storeAndRespond(
     cachedAt: Date.now(),
   };
   if (cacheStub) {
-    await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
+    try {
+      await cacheStub.write(cacheKey, cacheEntry, cacheTtl);
+    } catch (err) {
+      console.warn("fortune-llm: CACHE_DO write failed:", errorMessage(err));
+    }
   } else {
     await writeCache(cacheKey, cacheEntry, cacheTtl, env.CIRCUIT);
   }
