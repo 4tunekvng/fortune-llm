@@ -1,6 +1,8 @@
 /**
- * Auth on the gateway is intentionally simple: a single shared bearer
- * token (the GATEWAY_TOKEN secret). Consumer apps put it in
+ * Auth on the gateway is intentionally simple: a shared bearer token (the
+ * GATEWAY_TOKEN secret), plus an optional development token
+ * (GATEWAY_DEV_TOKEN) for local runs and evals that can be revoked on its
+ * own and never reaches paid Anthropic. Consumer apps put it in
  * `ANTHROPIC_API_KEY` so the @anthropic-ai/sdk forwards it as the
  * `x-api-key` header — exactly the same shape Anthropic itself accepts.
  *
@@ -10,6 +12,8 @@
 
 export interface AuthOk {
   ok: true;
+  /** True when the caller presented GATEWAY_DEV_TOKEN. */
+  dev: boolean;
 }
 
 export interface AuthFail {
@@ -18,7 +22,11 @@ export interface AuthFail {
   message: string;
 }
 
-export function authenticate(request: Request, expected: string | undefined): AuthOk | AuthFail {
+export function authenticate(
+  request: Request,
+  expected: string | undefined,
+  devToken?: string,
+): AuthOk | AuthFail {
   if (!expected) {
     // Misconfigured deploy — refuse rather than silently letting everyone in.
     return {
@@ -44,15 +52,15 @@ export function authenticate(request: Request, expected: string | undefined): Au
   }
 
   // Constant-time compare to avoid timing oracles on the secret.
-  if (!constantTimeEqual(presented, expected)) {
-    return {
-      ok: false,
-      status: 403,
-      message: "Invalid gateway token.",
-    };
+  if (constantTimeEqual(presented, expected)) return { ok: true, dev: false };
+  if (devToken && constantTimeEqual(presented, devToken)) {
+    return { ok: true, dev: true };
   }
-
-  return { ok: true };
+  return {
+    ok: false,
+    status: 403,
+    message: "Invalid gateway token.",
+  };
 }
 
 function constantTimeEqual(a: string, b: string): boolean {

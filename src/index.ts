@@ -85,6 +85,8 @@ interface Env {
   /** Mistral La Plateforme key. Free experimental tier — https://console.mistral.ai. */
   MISTRAL_API_KEY?: string;
   GATEWAY_TOKEN?: string;
+  /** Optional second token for local runs and evals; never routes to paid Anthropic. */
+  GATEWAY_DEV_TOKEN?: string;
   DEFAULT_OSS_MODEL?: string;
   DEFAULT_GEMINI_MODEL?: string;
   /** Comma-separated Gemini models tried after DEFAULT_GEMINI_MODEL's quota is spent. */
@@ -160,7 +162,11 @@ let circuitMissingWarned = false;
 // ── Route handlers ───────────────────────────────────────────────────────────
 
 async function handleStats(request: Request, env: Env): Promise<Response> {
-  const statsAuth = authenticate(request, env.GATEWAY_TOKEN);
+  const statsAuth = authenticate(
+    request,
+    env.GATEWAY_TOKEN,
+    env.GATEWAY_DEV_TOKEN,
+  );
   if (!statsAuth.ok) {
     return jsonError(
       statsAuth.status,
@@ -805,7 +811,7 @@ export default {
       );
     }
 
-    const auth = authenticate(request, env.GATEWAY_TOKEN);
+    const auth = authenticate(request, env.GATEWAY_TOKEN, env.GATEWAY_DEV_TOKEN);
     if (!auth.ok) {
       return jsonError(auth.status, "authentication_error", auth.message);
     }
@@ -826,6 +832,7 @@ export default {
     // specific and don't translate cleanly. Only forward when Anthropic
     // is configured; otherwise reject so callers see the policy clearly.
     if (!(request.method === "POST" && url.pathname === "/v1/messages")) {
+      if (auth.dev) return devTokenPaidRefusal();
       if (!env.ANTHROPIC_API_KEY) {
         return jsonError(
           501,
@@ -860,6 +867,9 @@ export default {
     }
     const validationErr = validateMessages(parsed);
     if (validationErr) return validationErr;
+    const route = (parsed.metadata as { fortune_route?: string } | undefined)
+      ?.fortune_route;
+    if (auth.dev && route === "anthropic") return devTokenPaidRefusal();
 
     // Past validation — this is a real /v1/messages request.
     statsEvents.push({ kind: "request" });
@@ -1153,6 +1163,15 @@ function formatSkippedHeader(
   return skipped
     .map((s) => `${s.tier}:${new Date(s.until).toISOString()}`)
     .join(",");
+}
+
+/** The development token is for free-tier runs only; paid Anthropic needs the main token. */
+function devTokenPaidRefusal(): Response {
+  return jsonError(
+    403,
+    "permission_error",
+    "The development token can't reach paid Anthropic. Use the free route.",
+  );
 }
 
 function jsonError(status: number, type: string, message: string): Response {
