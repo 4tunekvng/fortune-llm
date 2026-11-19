@@ -12,7 +12,7 @@ import {
   callGeminiModels,
   resolveGeminiModels,
 } from "../src/gemini.js";
-import { isQuotaError } from "../src/circuit-breaker.js";
+import { isKeyError, isQuotaError } from "../src/circuit-breaker.js";
 import type { AnthropicMessagesRequest, GeminiResponse } from "../src/types.js";
 
 const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMessagesRequest => ({
@@ -694,6 +694,20 @@ describe("callGeminiWithRotation", () => {
     );
     expect(resp.status).toBe(200);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("moves past a key Google rejects (401) to the next key", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("API key expired", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(okResponse());
+
+    const resp = await callGeminiWithRotation(
+      ["bad", "good"],
+      "gemini-2.5-flash",
+      baseReq(),
+      isKeyError,
+    );
+
+    expect(resp.status).toBe(200);
   });
 
   it("throws on the first non-quota error without trying remaining keys", async () => {

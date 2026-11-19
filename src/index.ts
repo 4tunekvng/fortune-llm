@@ -40,10 +40,10 @@ import {
 } from "./openrouter.js";
 import {
   getCircuitState,
-  isQuotaError,
+  isKeyError,
   resolveTripDurationMs,
   tripCircuit,
-  tripDurationFor,
+  tripMsFor,
   type CircuitState,
 } from "./circuit-breaker.js";
 import {
@@ -671,11 +671,12 @@ async function tripOnQuota(
   env: Env,
   tripDurationMs: number,
 ): Promise<void> {
-  if (tier === "anthropic" || !isQuotaError(err)) return;
+  if (tier === "anthropic") return;
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
-  await tripCircuit(tier, env.CIRCUIT, tripDurationFor(msg, tripDurationMs), msg);
+  const ms = tripMsFor(err, tripDurationMs);
+  if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
 // Builds the final 503 response after all chain tiers are exhausted.
@@ -1068,7 +1069,7 @@ async function invokeTier(
       keys,
       models,
       parsed,
-      isQuotaError,
+      isKeyError,
     );
     return withTierHeaders(
       resp,

@@ -159,6 +159,58 @@ describe("runChain through the fetch handler", () => {
     expect((await getCircuitState("groq", kv as never)).open).toBe(true);
   });
 
+  it("leaves the circuit closed when one request is too big for a tier (413)", async () => {
+    // Arrange: Groq's real per-minute "request too large" reply, in its real shape.
+    const message =
+      "Request too large for model `llama-3.3-70b-versatile` on tokens per minute " +
+      "(TPM): Limit 8000, Requested 9000, please reduce your message size and try " +
+      "again. Upgrade at https://console.groq.com/settings/billing";
+    const error = { message, type: "tokens", code: "rate_limit_exceeded" };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error }, { status: 413 })));
+    const kv = new MapKv();
+
+    // Act
+    await worker.fetch(messagesRequest(), makeEnv(kv) as never, ctx as never);
+
+    // Assert
+    expect((await getCircuitState("groq", kv as never)).open).toBe(false);
+  });
+
+  it("trips for the full window when a tier's account is out of credit (402)", async () => {
+    // Arrange
+    groqFails(402, "Payment required");
+    const kv = new MapKv();
+
+    // Act
+    await worker.fetch(messagesRequest(), makeEnv(kv) as never, ctx as never);
+
+    // Assert
+    const state = await getCircuitState("groq", kv as never);
+    expect((state.until ?? 0) - Date.now()).toBeGreaterThan(50 * 60 * 1000);
+  });
+
+  it("trips a 429 for as long as its Retry-After header says", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { error: { message: "rate limit reached" } },
+          { status: 429, headers: { "retry-after": "90" } },
+        ),
+      ),
+    );
+    const kv = new MapKv();
+
+    // Act
+    await worker.fetch(messagesRequest(), makeEnv(kv) as never, ctx as never);
+
+    // Assert
+    const state = await getCircuitState("groq", kv as never);
+    expect((state.until ?? 0) - Date.now()).toBeGreaterThan(85_000);
+    expect((state.until ?? 0) - Date.now()).toBeLessThan(95_000);
+  });
+
   it("leaves the circuit closed when a caller's own key hits its quota", async () => {
     // Arrange
     groqFails(429, "rate limit reached");

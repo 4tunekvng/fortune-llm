@@ -26,6 +26,7 @@ import type {
   GeminiResponse,
 } from "./types.js";
 import { getOutputSchemaObject } from "./structured-output.js";
+import { UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
   parseSseDataLine,
@@ -368,9 +369,10 @@ export function resolveGeminiKeys(plural: string | undefined, singular: string |
 }
 
 /**
- * Call Gemini with key rotation. Tries keys in randomized order. A quota
- * / rate-limit failure on one key falls through to the next; any non-
- * quota failure (4xx auth/config, 5xx, network) is thrown immediately
+ * Call Gemini with key rotation. Tries keys in randomized order. A failure
+ * that belongs to one key (quota, rate limit, 401 bad key, 402 no credit)
+ * falls through to the next; anything else (bad request, 5xx, network) is
+ * thrown immediately
  * because it isn't a key-specific issue — the outer dispatcher will
  * fall to the next tier (workers-ai / openrouter / anthropic).
  *
@@ -387,7 +389,7 @@ export async function callGeminiWithRotation(
   keys: string[],
   model: string,
   req: AnthropicMessagesRequest,
-  isQuotaError: (err: unknown) => boolean,
+  isKeyError: (err: unknown) => boolean,
 ): Promise<Response> {
   if (keys.length === 0) {
     throw new Error("GEMINI_API_KEY not configured");
@@ -398,7 +400,7 @@ export async function callGeminiWithRotation(
     try {
       return await callGemini({ apiKey, model }, req);
     } catch (err) {
-      if (isQuotaError(err)) {
+      if (isKeyError(err)) {
         lastQuotaError = err;
         continue;
       }
@@ -428,7 +430,7 @@ export async function callGeminiModels(
   keys: string[],
   models: string[],
   req: AnthropicMessagesRequest,
-  isQuotaError: (err: unknown) => boolean,
+  isKeyError: (err: unknown) => boolean,
 ): Promise<{ resp: Response; model: string }> {
   // A quota error wins the final throw, so the tier's circuit trips only when
   // a model was really out of quota, not when every model was just missing.
@@ -436,11 +438,11 @@ export async function callGeminiModels(
   let lastError: unknown = null;
   for (const model of models) {
     try {
-      return { resp: await callGeminiWithRotation(keys, model, req, isQuotaError), model };
+      return { resp: await callGeminiWithRotation(keys, model, req, isKeyError), model };
     } catch (err) {
-      if (!isQuotaError(err) && !/Gemini 404/.test(err instanceof Error ? err.message : String(err))) throw err;
+      if (!isKeyError(err) && !/Gemini 404/.test(err instanceof Error ? err.message : String(err))) throw err;
       lastError = err;
-      if (isQuotaError(err)) lastQuotaError = err;
+      if (isKeyError(err)) lastQuotaError = err;
     }
   }
   const final = lastQuotaError ?? lastError;
@@ -498,8 +500,7 @@ export async function callGemini(
   });
 
   if (!upstream.ok) {
-    const errText = await upstream.text().catch(() => "");
-    throw new Error(`Gemini ${upstream.status}: ${errText.slice(0, 400)}`);
+    throw await UpstreamError.from("Gemini", upstream);
   }
 
   if (wantsStream) {

@@ -29,6 +29,7 @@ import type {
   OpenAIToolCall,
 } from "./types.js";
 import { buildWorkersAiInput, toAnthropicContent } from "./workers-ai.js";
+import { UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
   parseSseDataLine,
@@ -152,8 +153,7 @@ export async function callOpenAICompatible(
   });
 
   if (!upstream.ok) {
-    const errText = await upstream.text().catch(() => "");
-    throw new Error(`${config.label} ${upstream.status}: ${errText.slice(0, 400)}`);
+    throw await UpstreamError.from(config.label, upstream);
   }
 
   if (wantsStream) {
