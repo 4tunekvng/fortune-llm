@@ -23,8 +23,9 @@
  * Usage:
  *   node tests-integration/sdk-e2e.mjs
  *
- * The script reads GATEWAY_URL and GATEWAY_TOKEN from env or falls
- * back to the prod defaults baked in below.
+ * The script reads GATEWAY_URL (default: the production gateway) and
+ * GATEWAY_TOKEN from the environment. The token has no default: a token
+ * in this public repository is a token anyone can spend.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -32,8 +33,11 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 
 const GATEWAY_URL = process.env.GATEWAY_URL ?? "https://fortune-llm.fortunee.workers.dev";
-const GATEWAY_TOKEN =
-  process.env.GATEWAY_TOKEN ?? "KtfvUb0dLwGu7NSQxyKlvbkse2hFBvK1ZPf9RwDSIfo";
+const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN;
+if (!GATEWAY_TOKEN) {
+  console.error("Set GATEWAY_TOKEN to a gateway token first.");
+  process.exit(2);
+}
 
 const client = new Anthropic({
   baseURL: GATEWAY_URL,
