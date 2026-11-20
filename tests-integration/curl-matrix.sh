@@ -9,7 +9,7 @@
 set -uo pipefail
 
 GATEWAY="${GATEWAY_URL:-https://fortune-llm.fortunee.workers.dev}"
-TOKEN="${GATEWAY_TOKEN:-KtfvUb0dLwGu7NSQxyKlvbkse2hFBvK1ZPf9RwDSIfo}"
+TOKEN="${GATEWAY_TOKEN:?Set GATEWAY_TOKEN to a gateway token first.}"
 RUN_TAG="run-$(date +%s)"
 
 PASS=0
