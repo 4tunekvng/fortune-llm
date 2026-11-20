@@ -248,6 +248,17 @@ describe("sanitizeJsonSchemaForGemini", () => {
     expect(props.bytes).toEqual({ type: "integer", minimum: 0, maximum: 1_000_000 });
     expect(props.files).toEqual({ type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 });
   });
+
+  it("keeps a const as a one-value enum, so the model must still pick it", () => {
+    // Arrange: z.literal("note") arrives from the SDK as a const.
+    const schema = { type: "string", const: "note" };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out).toEqual({ type: "string", enum: ["note"] });
+  });
 });
 
 describe("translateToolsToGemini", () => {

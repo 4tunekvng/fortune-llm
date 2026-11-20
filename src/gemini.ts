@@ -240,6 +240,10 @@ function sanitizeSchemaNode(node: unknown): unknown {
       out[k] = v;
     }
   }
+  // Gemini has no `const`, and dropping it lets the model answer anything.
+  // Its `enum` takes strings only, so a string const becomes a one-value enum.
+  const constant = (node as Record<string, unknown>).const;
+  if (typeof constant === "string" && !("enum" in out)) out.enum = [constant];
   return out;
 }
 
