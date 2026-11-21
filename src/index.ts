@@ -55,7 +55,7 @@ import {
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
-import type { StatsEvent } from "./stats-do.js";
+import type { DailyStats, StatsEvent } from "./stats-do.js";
 import type { CachedResponse } from "./cache-do.js";
 // Re-export the DO classes so the Workers runtime can find them.
 export { StatsDO } from "./stats-do.js";
@@ -126,30 +126,7 @@ interface Env {
 
 type StatsDOStub = {
   recordEvents(e: StatsEvent[], consumer: string | null): Promise<void>;
-  getStats(): Promise<{
-    date: string;
-    totals: {
-      requests: number;
-      cache_hits: number;
-      cache_misses: number;
-      rate_limited: number;
-      errors: number;
-    };
-    per_tier: Record<string, { ok: number; fail: number }>;
-    per_consumer: Record<
-      string,
-      {
-        totals: {
-          requests: number;
-          cache_hits: number;
-          cache_misses: number;
-          rate_limited: number;
-          errors: number;
-        };
-        per_tier: Record<string, { ok: number; fail: number }>;
-      }
-    >;
-  }>;
+  getStats(): Promise<DailyStats>;
 };
 
 type CacheDOStub = {
