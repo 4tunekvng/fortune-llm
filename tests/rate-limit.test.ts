@@ -94,33 +94,76 @@ describe("checkRateLimit", () => {
 });
 
 describe("getRateLimitScope", () => {
-  it("returns consumer scope when valid x-fortune-consumer header present", () => {
+  const registered = { RATE_LIMIT_PER_MIN_LENA: "200" };
+
+  it("returns consumer scope for a registered consumer", () => {
     const req = new Request("https://x", { headers: { "x-fortune-consumer": "lena" } });
-    expect(getRateLimitScope(req)).toEqual({ scope: "lena", kind: "consumer" });
+    expect(getRateLimitScope(req, registered, false)).toEqual({
+      scope: "lena",
+      kind: "consumer",
+    });
   });
 
   it("lowercases consumer names for consistency", () => {
     const req = new Request("https://x", { headers: { "x-fortune-consumer": "LENA" } });
-    expect(getRateLimitScope(req)).toEqual({ scope: "lena", kind: "consumer" });
+    expect(getRateLimitScope(req, registered, false)).toEqual({
+      scope: "lena",
+      kind: "consumer",
+    });
+  });
+
+  it("keeps a made-up consumer name in its IP bucket", () => {
+    // Arrange: a fresh name per request would otherwise get a fresh bucket.
+    const req = new Request("https://x", {
+      headers: { "x-fortune-consumer": "rand-1", "cf-connecting-ip": "1.2.3.4" },
+    });
+
+    // Act
+    const scope = getRateLimitScope(req, registered, false);
+
+    // Assert
+    expect(scope).toEqual({ scope: "1.2.3.4", kind: "ip" });
+  });
+
+  it("keeps the development token out of a production app's bucket", () => {
+    // Arrange
+    const req = new Request("https://x", {
+      headers: { "x-fortune-consumer": "lena", "cf-connecting-ip": "1.2.3.4" },
+    });
+
+    // Act
+    const scope = getRateLimitScope(req, registered, true);
+
+    // Assert
+    expect(scope).toEqual({ scope: "1.2.3.4", kind: "ip" });
   });
 
   it("falls back to IP scope when the header is missing", () => {
     const req = new Request("https://x", { headers: { "cf-connecting-ip": "1.2.3.4" } });
-    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+    expect(getRateLimitScope(req, registered, false)).toEqual({
+      scope: "1.2.3.4",
+      kind: "ip",
+    });
   });
 
   it("falls back to IP scope when the consumer header has invalid characters", () => {
     const req = new Request("https://x", {
       headers: { "x-fortune-consumer": "bad name with spaces!", "cf-connecting-ip": "1.2.3.4" },
     });
-    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+    expect(getRateLimitScope(req, registered, false)).toEqual({
+      scope: "1.2.3.4",
+      kind: "ip",
+    });
   });
 
   it("falls back to IP scope when the consumer header is too long", () => {
     const req = new Request("https://x", {
       headers: { "x-fortune-consumer": "x".repeat(33), "cf-connecting-ip": "1.2.3.4" },
     });
-    expect(getRateLimitScope(req)).toEqual({ scope: "1.2.3.4", kind: "ip" });
+    expect(getRateLimitScope(req, registered, false)).toEqual({
+      scope: "1.2.3.4",
+      kind: "ip",
+    });
   });
 });
 

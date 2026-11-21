@@ -119,6 +119,7 @@ every other consumer.
 |---|---|---|
 | Limit | 200 req/min per IP | Override via `RATE_LIMIT_PER_MIN` in `[vars]`. Set 0 to disable. |
 | Identification | `cf-connecting-ip` → `x-forwarded-for` first hop → `"unknown"` | Cloudflare always sets `cf-connecting-ip` for non-CF clients. |
+| Per-app bucket | `x-fortune-consumer: <name>`, only for a name registered with `RATE_LIMIT_PER_MIN_<NAME>` in `[vars]` (knox, data-science-agent) and only with the production token | The header is a claim, not proof. An unregistered name, or any name sent with the development token, stays in the caller's IP bucket, so a caller can't mint fresh buckets or borrow an app's. A holder of the production token can still name a registered app; the provider quotas behind every tier are shared by all callers either way. |
 | Response on cap | `429 {"type":"rate_limit_error","message":…}` with `Retry-After` header | Standard back-off semantics. |
 | Failure mode | Fails open on KV unavailability | Better to miss a limit than block all traffic on infra trouble. |
 

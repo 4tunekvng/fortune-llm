@@ -13,10 +13,13 @@
  * Consumers that don't set the header fall back to IP-scoping (the
  * old behavior).
  *
- * Per-consumer caps can be overridden in env via
- * `RATE_LIMIT_PER_MIN_<CONSUMER>` (uppercased, e.g.
- * `RATE_LIMIT_PER_MIN_LENA=500`). Unmatched consumers use the global
- * `RATE_LIMIT_PER_MIN` default.
+ * A consumer gets its own bucket only once the operator registers it by
+ * setting `RATE_LIMIT_PER_MIN_<CONSUMER>` (uppercased, e.g.
+ * `RATE_LIMIT_PER_MIN_LENA=500`), and only for the production token. The
+ * header is a claim, not proof: without registration a caller could make
+ * up a fresh name per request and never fill a bucket (issue #19), and the
+ * development token must not borrow a production app's bucket or ceiling.
+ * Any other request is IP-scoped.
  *
  * Mechanism:
  *   - On each request, atomically read the current count, reject if
@@ -65,20 +68,29 @@ export function getClientIp(request: Request): string {
 }
 
 /**
- * Resolve the rate-limit scope: the consumer name (if a valid
- * `x-fortune-consumer` header is set) or the client IP. The scope
- * becomes the bucket key for rate-limiting AND the lookup for any
- * per-consumer limit override.
+ * Resolve the rate-limit scope: the consumer name when the header names a
+ * registered consumer and the caller holds the production token, else the
+ * client IP. The scope becomes the bucket key for rate-limiting AND the
+ * lookup for the per-consumer limit.
  *
  * Sanitized: must match `[a-z0-9_-]{1,32}` to prevent KV-key-injection
  * or absurdly long bucket keys. Invalid headers fall back to IP-scope.
  */
-export function getRateLimitScope(request: Request): { scope: string; kind: "consumer" | "ip" } {
+export function getRateLimitScope(
+  request: Request,
+  envBag: Record<string, string | undefined>,
+  dev: boolean,
+): { scope: string; kind: "consumer" | "ip" } {
   const raw = request.headers.get("x-fortune-consumer");
-  if (raw && CONSUMER_RE.test(raw)) {
+  if (!dev && raw && CONSUMER_RE.test(raw) && envBag[consumerLimitVar(raw)] !== undefined) {
     return { scope: raw.toLowerCase(), kind: "consumer" };
   }
   return { scope: getClientIp(request), kind: "ip" };
+}
+
+/** The env var that registers a consumer and sets its per-minute cap. */
+function consumerLimitVar(consumer: string): string {
+  return `RATE_LIMIT_PER_MIN_${consumer.toUpperCase().replace(/-/g, "_")}`;
 }
 
 /**
@@ -93,8 +105,7 @@ export function resolveConsumerRateLimit(
   envBag: Record<string, string | undefined>,
 ): number {
   if (!CONSUMER_RE.test(consumer)) return globalDefault;
-  const envName = `RATE_LIMIT_PER_MIN_${consumer.toUpperCase().replace(/-/g, "_")}`;
-  return resolveRateLimitPerMin(envBag[envName] ?? String(globalDefault));
+  return resolveRateLimitPerMin(envBag[consumerLimitVar(consumer)] ?? String(globalDefault));
 }
 
 /**
