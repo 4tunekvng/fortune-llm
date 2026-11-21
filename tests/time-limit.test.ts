@@ -112,7 +112,7 @@ describe("tierLimitMs", () => {
     ];
 
     // Assert
-    expect(limits).toEqual([25_120, 60_960, undefined, undefined, 7_000]);
+    expect(limits).toEqual([15_120, 50_960, undefined, undefined, 7_000]);
   });
 });
 

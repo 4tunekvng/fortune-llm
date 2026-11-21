@@ -2,11 +2,14 @@
  * Time limits for the free tiers, so one slow or hanging provider can't
  * hold a request. Two limits apply to every free tier call:
  *
- *   - Its own limit, for the tiers measured fast: 20 s plus 5 ms for each
+ *   - Its own limit, for the tiers measured fast: 10 s plus 5 ms for each
  *     token the reply may run to (`max_tokens`). On 2026-11-21 gemini's
- *     slowest reply was 6.8 s, a 3.5K-token curriculum, about 600 tokens a
- *     second, and Knox logged groq at about 3 s; 5 ms a token is a third of
- *     that speed, so a long reply is never cut for being long. openrouter
+ *     short replies took about 1 s and its slowest, a 3.5K-token
+ *     curriculum, 6.8 s (about 600 tokens a second); Knox logged groq at
+ *     about 3 s. 10 s is ten times the short replies and 5 ms a token a
+ *     third of the measured speed, so a long reply is never cut for being
+ *     long, while a hung call (gemini hung past 30 s on a 2K-token request
+ *     that day) gives way sooner. openrouter
  *     (good replies up to 60 s) and workers-ai (64 s and more) have no own
  *     limit; they sit last in the chain and only the chain budget bounds
  *     them. Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
@@ -33,7 +36,7 @@
 import type { BackendKind } from "./route.js";
 
 export const DEFAULT_CHAIN_TIME_LIMIT_MS = 80_000;
-const FAST_TIER_BASE_MS = 20_000;
+const FAST_TIER_BASE_MS = 10_000;
 const FAST_TIER_MS_PER_TOKEN = 5;
 const FAST_TIERS: ReadonlySet<BackendKind> = new Set<BackendKind>([
   "groq",
