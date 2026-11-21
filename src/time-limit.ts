@@ -2,13 +2,14 @@
  * Time limits for the free tiers, so one slow or hanging provider can't
  * hold a request. Two limits apply to every free tier call:
  *
- *   - Its own limit, for the tiers measured fast. On 2026-11-21 gemini's
- *     slowest reply was 6.8 s (an 8K-token curriculum) and Knox logged
- *     groq at about 3 s, so 20 s is about 3x the slowest reply: past it the
- *     provider is hanging, not working. openrouter (good replies up to 60 s)
- *     and workers-ai (good replies up to 64 s and more) have no own limit;
- *     they sit last in the chain and only the chain budget bounds them.
- *     Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
+ *   - Its own limit, for the tiers measured fast: 20 s plus 5 ms for each
+ *     token the reply may run to (`max_tokens`). On 2026-11-21 gemini's
+ *     slowest reply was 6.8 s, a 3.5K-token curriculum, about 600 tokens a
+ *     second, and Knox logged groq at about 3 s; 5 ms a token is a third of
+ *     that speed, so a long reply is never cut for being long. openrouter
+ *     (good replies up to 60 s) and workers-ai (64 s and more) have no own
+ *     limit; they sit last in the chain and only the chain budget bounds
+ *     them. Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
  *   - The chain budget shared by all free tiers: `CHAIN_TIME_LIMIT_MS`
  *     (default 80 s, under Knox's 90 s and Leggo's 100 s deadlines), cut to
  *     the caller's own timeout less 2 s when the SDK sends it in
@@ -19,13 +20,19 @@
  * up within PAID_MIN_LEFT_MS: the reply would be billed and thrown away.
  *
  * A long-context request (over route.ts's 100K-token mark) has no own
- * tier limit either: the 20 s was measured on prompts under 10K tokens.
+ * tier limit either: the speeds above were measured on prompts under 10K
+ * tokens.
+ *
+ * A timeout never shuts the tier for other requests: one slow reply says
+ * nothing certain about the next (a 60 s trip on 2026-11-21 sent every app
+ * to the slow tiers within a minute of going live).
  */
 
 import type { BackendKind } from "./route.js";
 
 export const DEFAULT_CHAIN_TIME_LIMIT_MS = 80_000;
-const FAST_TIER_LIMIT_MS = 20_000;
+const FAST_TIER_BASE_MS = 20_000;
+const FAST_TIER_MS_PER_TOKEN = 5;
 const FAST_TIERS: ReadonlySet<BackendKind> = new Set<BackendKind>([
   "groq",
   "cerebras",
@@ -37,8 +44,6 @@ const FAST_TIERS: ReadonlySet<BackendKind> = new Set<BackendKind>([
 const CLIENT_MARGIN_MS = 2_000;
 /** Below this the chain could not reach even one tier. */
 const MIN_BUDGET_MS = 5_000;
-/** How long a tier that ran out its own limit stays skipped. */
-export const TIMEOUT_TRIP_MS = 60_000;
 /**
  * Paid Anthropic is not started with less than this left before the
  * caller's own timeout: a Claude reply of a few thousand tokens takes
@@ -87,12 +92,14 @@ export function paidHasTime(deadline: number | undefined, now: number): boolean 
 export function tierLimitMs(
   tier: BackendKind,
   env: Record<string, unknown>,
+  maxTokens: number,
 ): number | undefined {
   const name = `TIER_TIME_LIMIT_MS_${tier.toUpperCase().replace(/-/g, "_")}`;
   const raw = env[name];
   const override = positiveMs(typeof raw === "string" ? raw : undefined);
   if (override !== undefined) return override;
-  return FAST_TIERS.has(tier) ? FAST_TIER_LIMIT_MS : undefined;
+  if (!FAST_TIERS.has(tier)) return undefined;
+  return FAST_TIER_BASE_MS + FAST_TIER_MS_PER_TOKEN * maxTokens;
 }
 
 /** Thrown when a tier call runs past its limit. */
@@ -100,8 +107,6 @@ export class TierTimeoutError extends Error {
   constructor(
     tier: BackendKind,
     readonly ms: number,
-    /** True when the tier's own limit fired, not the chain budget. */
-    readonly ownLimit: boolean,
   ) {
     super(`${tier} timed out after ${ms} ms`);
     this.name = "TierTimeoutError";
