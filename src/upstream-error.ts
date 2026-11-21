@@ -23,6 +23,19 @@ export class UpstreamError extends Error {
   }
 }
 
+/**
+ * A failure that belongs to one request, not to the provider: a schema the
+ * tier can't express, or a reply that missed the caller's schema. Its
+ * message names the caller's own fields (a field called `quotaLeft`), so it
+ * is never read for quota words and never shuts a tier for everyone.
+ */
+export class RequestShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestShapeError";
+  }
+}
+
 /** Retry-After is either whole seconds or an HTTP date. */
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;

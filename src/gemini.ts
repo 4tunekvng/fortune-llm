@@ -26,7 +26,7 @@ import type {
   GeminiResponse,
 } from "./types.js";
 import { getOutputSchemaObject } from "./structured-output.js";
-import { UpstreamError } from "./upstream-error.js";
+import { RequestShapeError, UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
   parseSseDataLine,
@@ -224,22 +224,60 @@ export function sanitizeJsonSchemaForGemini(
   schema: Record<string, unknown>,
   where = "schema",
 ): Record<string, unknown> {
-  return sanitizeSchemaNode(schema, where) as Record<string, unknown>;
+  const defs = { ...(schema.definitions as object), ...(schema.$defs as object) };
+  const out = sanitizeSchemaNode(schema, where, defs as Defs, []);
+  return out as Record<string, unknown>;
 }
 
-function sanitizeSchemaNode(node: unknown, path: string): unknown {
-  if (node === null || typeof node !== "object" || Array.isArray(node)) return node;
+type Defs = Record<string, unknown>;
+
+/**
+ * The SDK moves a nested object into `$defs` and points at it with `$ref`
+ * (for example a list of objects whose fields carry limits). Gemini takes
+ * neither keyword, so the reference is written out in place; dropped, the
+ * list's items would reach Gemini with no shape at all. A schema that
+ * refers back into itself can't be written out and is refused.
+ */
+function inlineRef(
+  node: Record<string, unknown>,
+  defs: Defs,
+  path: string,
+  seen: string[],
+): { node: Record<string, unknown>; seen: string[] } {
+  const ref = node.$ref;
+  if (typeof ref !== "string") return { node, seen };
+  const name = /^#\/(?:\$defs|definitions)\/(.+)$/.exec(ref)?.[1];
+  const target = name === undefined ? undefined : defs[decodeURIComponent(name)];
+  if (typeof target !== "object" || target === null) return { node, seen };
+  if (seen.includes(ref)) {
+    throw new RequestShapeError(`Gemini cannot take a recursive schema at ${path}`);
+  }
+  const { $ref: _ref, ...rest } = node;
+  return { node: { ...(target as object), ...rest }, seen: [...seen, ref] };
+}
+
+function sanitizeSchemaNode(
+  raw: unknown,
+  path: string,
+  defs: Defs,
+  seenRefs: string[],
+): unknown {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const asNode = raw as Record<string, unknown>;
+  const { node, seen } = inlineRef(asNode, defs, path, seenRefs);
+  if (node !== asNode) return sanitizeSchemaNode(node, path, defs, seen);
   rejectFreeFormMap(node as Record<string, unknown>, path);
+  rejectNonTextChoices(node as Record<string, unknown>, path);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
     if (!GEMINI_SCHEMA_ALLOWED_FIELDS.has(k)) continue;
     if (k === "properties") {
-      out[k] = sanitizePropertiesMap(v, path);
+      out[k] = sanitizePropertiesMap(v, path, defs, seen);
     } else if (k === "items") {
-      out[k] = sanitizeSchemaNode(v, `${path}[]`);
+      out[k] = sanitizeSchemaNode(v, `${path}[]`, defs, seen);
     } else if (k === "anyOf") {
       out[k] = Array.isArray(v)
-        ? v.map((s, i) => sanitizeSchemaNode(s, `${path}.anyOf[${i}]`))
+        ? v.map((s, i) => sanitizeSchemaNode(s, `${path}.anyOf[${i}]`, defs, seen))
         : v;
     } else {
       // type, description, enum (array of primitives), required (array of
@@ -283,18 +321,47 @@ function rejectFreeFormMap(node: Record<string, unknown>, path: string): void {
   const props = node.properties;
   const hasProps =
     typeof props === "object" && props !== null && Object.keys(props).length > 0;
-  if (node.additionalProperties && !hasProps) {
-    throw new Error(
+  // The SDK writes a z.record map as a closed object with no properties and
+  // its key rule in the description.
+  const sdkRecord =
+    typeof node.description === "string" &&
+    node.description.includes("propertyNames");
+  if ((node.additionalProperties || sdkRecord) && !hasProps) {
+    throw new RequestShapeError(
       `Gemini cannot take a free-form map (an object with no fixed keys) at ${path}`,
     );
   }
 }
 
-function sanitizePropertiesMap(node: unknown, path: string): Record<string, unknown> {
+/**
+ * Gemini's `enum` holds strings only and it has no `const`, so a number or
+ * boolean choice (`z.literal(1)`, `z.enum` over numbers) would reach it with
+ * no constraint and come back off the schema. Throwing before the call moves
+ * the chain on at no cost.
+ */
+function rejectNonTextChoices(node: Record<string, unknown>, path: string): void {
+  const choices = [
+    ...("const" in node ? [node.const] : []),
+    ...(Array.isArray(node.enum) ? node.enum : []),
+  ];
+  if (choices.some((c) => typeof c !== "string")) {
+    throw new RequestShapeError(
+      `Gemini cannot take a non-text enum or const at ${path}`,
+    );
+  }
+}
+
+function sanitizePropertiesMap(
+  node: unknown,
+  path: string,
+  defs: Defs,
+  seen: string[],
+): Record<string, unknown> {
   if (node === null || typeof node !== "object" || Array.isArray(node)) return {};
   const out: Record<string, unknown> = {};
   for (const [propName, propSchema] of Object.entries(node as Record<string, unknown>)) {
-    out[propName] = sanitizeSchemaNode(propSchema, `${path}.${propName}`);
+    const where = `${path}.${propName}`;
+    out[propName] = sanitizeSchemaNode(propSchema, where, defs, seen);
   }
   return out;
 }
