@@ -9,7 +9,8 @@ last-resort tier appended automatically when the worker has an
                 ┌──────────────────────────────────────────────────────────────────────────┐
 POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
                 ├──────────────────────────────────────────────────────────────────────────┤
-                │ default / tools[]     →  [groq, workers-ai, gemini, openrouter,*anthropic]│
+                │ default / tools[]     →  [groq, gemini, cerebras, mistral, github-models,│
+                │                           openrouter, workers-ai, *anthropic] fastest first│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
                 │ output_config (JSON)  →  [anthropic]   (free tiers can't speak it)        │
@@ -90,6 +91,18 @@ x-fortune-llm-cache:                 hit | miss-stored | miss-skip
 x-fortune-llm-cache-age-s:           seconds since the cached entry was written (hits only)
 x-fortune-llm-rate-limit:            count/limit (only on 429 responses)
 ```
+
+## Private callers
+
+`PRIVATE_CONSUMERS` (a comma list in `wrangler.toml`, `knox` today) names
+callers, by their `x-fortune-consumer` header, whose prompts must never reach
+a free tier whose provider may keep or learn from them: gemini, openrouter,
+mistral and github-models. Those tiers are left out of every chain for them
+(text, tools, images, long context), and a private request pinned to one of
+them gets a 400. Knox sends people's health insurance letters. Claiming a
+name only makes the claimant's own routing more private, so the header needs
+no proof here. The cost: while groq is out, a private caller's free chain is
+groq, cerebras and workers-ai, so its replies are as slow as Workers AI.
 
 ## Response cache
 

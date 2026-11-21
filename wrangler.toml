@@ -21,6 +21,11 @@ DEFAULT_MISTRAL_MODEL = "mistral-small-latest"
 # truncate silently in code. Override per-deploy without code change.
 DEFAULT_OPENROUTER_MODELS = "google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free,thinkingmachines/inkling:free"
 
+# Callers (x-fortune-consumer) whose prompts never go to a free tier that may
+# keep or learn from them: gemini, openrouter, mistral, github-models. Knox
+# sends people's health insurance letters.
+PRIVATE_CONSUMERS = "knox"
+
 # Free-first chain with paid Anthropic as auto-last-resort. Each free
 # provider is an independent quota pool, so the more keys you have set,
 # the higher the daily ceiling before anthropic is reached.

@@ -3,14 +3,10 @@
  * tries each tier in order until one succeeds.
  *
  * Default policy (free first, paid as last-resort):
- *   - plain text chat        →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
- *                                                     (seven independent free-quota pools
- *                                                      — exhausting all on the same day
- *                                                      is what makes the paid fallback rare)
- *   - has tools[]            →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
- *                                                     (groq llama-4-scout has the best free
- *                                                      tool-use; cerebras/mistral/workers-ai/gemini/
- *                                                      github-models/openrouter are independent fallbacks)
+ *   - plain text chat or tools[] →  [groq, gemini, cerebras, mistral,
+ *                                     github-models, openrouter, workers-ai]
+ *       (seven independent free-quota pools, fastest first; exhausting all
+ *       on the same day is what makes the paid fallback rare)
  *   - image content present  →  [gemini, openrouter, workers-ai]
  *                                                     (gemini is best free vision; OpenRouter
  *                                                      Llama 4 is next; Gemma 4 26B on Workers AI
@@ -75,13 +71,43 @@ export interface DecideRouteOptions {
    * been circuit-broken.
    */
   anthropicFallback?: boolean;
+  /**
+   * The caller's prompts must never reach a tier whose free terms let the
+   * provider keep them or learn from them (Knox's health letters).
+   */
+  privateConsumer?: boolean;
 }
+
+/**
+ * Free tiers whose providers may keep what they are sent or learn from it:
+ * Gemini's unpaid tier, OpenRouter's `:free` model hosts, Mistral's free
+ * plan, and GitHub Models (prompts are logged for abuse monitoring). A
+ * private caller's chain leaves them out.
+ */
+const MAY_KEEP_PROMPTS: ReadonlySet<BackendKind> = new Set<BackendKind>([
+  "gemini",
+  "openrouter",
+  "mistral",
+  "github-models",
+]);
 
 const LONG_CONTEXT_THRESHOLD = 100_000;
 
 export function decideRoute(
   req: AnthropicMessagesRequest,
   options: DecideRouteOptions = {},
+): RouteChain {
+  const chain = chooseChain(req, options);
+  if (!options.privateConsumer) return chain;
+  return {
+    tiers: chain.tiers.filter((t) => !MAY_KEEP_PROMPTS.has(t)),
+    reason: `${chain.reason}; private caller, tiers that may keep prompts left out`,
+  };
+}
+
+function chooseChain(
+  req: AnthropicMessagesRequest,
+  options: DecideRouteOptions,
 ): RouteChain {
   const meta = req.metadata as { fortune_route?: string } | undefined;
 
@@ -173,23 +199,25 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   }
 
   // Default for both plain chat and tool-using calls. Stacks SEVEN
-  // independent free-quota pools in order:
-  //   groq           — fastest, native tool use, biggest free RPM
-  //   cerebras       — very fast (custom silicon), independent quota
-  //   mistral        — Mistral La Plateforme free experimental tier
-  //   workers-ai     — Cloudflare account-scoped neurons
-  //   gemini         — per-Google-API-key quota (multi-key rotation)
+  // independent free-quota pools, fastest first, so the slow pools are the
+  // reserve rather than the first stop (replays of 2026-11-21):
+  //   groq           — about 3 s, native tool use; shared daily token cap
+  //   gemini         — 1-7 s; per-Google-API-key quota (multi-key rotation)
+  //   cerebras       — fast when it works; fails in under 1 s (402 today)
+  //   mistral        — free experimental tier; fails in under 1 s (429 today)
   //   github-models  — Azure-backed, free with any GitHub account
-  //   openrouter     — meta-router with multi-model fallback
-  // Seven independent quotas = "rarely hits anthropic" even at scale.
+  //   openrouter     — 2-60 s; meta-router with multi-model fallback
+  //   workers-ai     — 11-64 s and more; Cloudflare account-scoped neurons
+  // The pools are the same as before, so when gemini's quota runs out the
+  // chain lands where it used to; it is faster whenever gemini answers.
   return [
     "groq",
+    "gemini",
     "cerebras",
     "mistral",
-    "workers-ai",
-    "gemini",
     "github-models",
     "openrouter",
+    "workers-ai",
   ];
 }
 
