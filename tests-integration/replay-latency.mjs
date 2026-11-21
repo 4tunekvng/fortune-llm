@@ -12,9 +12,13 @@
  *     [--apps leggo,maestro,thesis,tellar] [--tiers gemini,workers-ai,...]
  *     [--out results.jsonl]
  *
- * chain:  every app the way it calls the gateway today, held to free tiers.
- *         Tellar pins one tier per call and walks its own list, so it is
- *         replayed that way; the others send fortune_route="free".
+ * chain:  every app the way its code calls the gateway today: each app's own
+ *         list of tries, each with that try's timeout (sent in
+ *         X-Stainless-Timeout, as the SDK does), held to free tiers (a try
+ *         the app sends to the default chain is sent as fortune_route="free").
+ *         Leggo: free 100 s. Maestro (maestro #99, #107): gemini 25 s,
+ *         openrouter 60 s, free 100 s. Knox: free 90 s, groq 20 s, free 60 s.
+ *         Tellar: gemini, mistral, groq, openrouter, workers-ai, no timeout.
  * pinned: each app pinned to each tier in --tiers, to size per-tier limits.
  *
  * A run succeeds when the reply is HTTP 200 and its content is usable: the
@@ -161,6 +165,7 @@ function leggoRequest() {
       ],
       metadata: { user_id: "leggo-app", fortune_require_tools: true },
     },
+    tries: [{ route: "free", timeoutMs: 100_000 }],
     check(msg) {
       const names = new Set(LEGGO_TOOLS.map((t) => t.name));
       const call = msg.content.find((b) => b.type === "tool_use");
@@ -173,6 +178,8 @@ function leggoRequest() {
 
 // ── Maestro: a 14-day curriculum through messages.parse ─────────────────────
 
+// Maestro's generatedSkillSchema (src/practice/lib/curriculum/schema.ts):
+// defaults included, as the app sends it.
 const targets = z.object({
   fillersPerMinMax: z.number(),
   wpmMin: z.number(),
@@ -185,7 +192,7 @@ const SkillSchema = z.object({
   name: z.string().max(1000),
   tagline: z.string().max(1000),
   description: z.string().max(1000),
-  kind: z.enum(["speaking", "practice"]),
+  kind: z.enum(["speaking", "practice"]).default("practice"),
   drills: z.array(
     z.object({
       id: z.string().max(1000),
@@ -193,8 +200,14 @@ const SkillSchema = z.object({
       description: z.string().max(4000),
       day: z.number().int(),
       durationSec: z.number().int(),
-      prompt: z.string().max(4000),
-      targets,
+      prompt: z.string().max(4000).default(""),
+      targets: targets.default({
+        fillersPerMinMax: 4,
+        wpmMin: 120,
+        wpmMax: 170,
+        eyeContactMin: 0.5,
+        gestureVarietyMin: 0.3,
+      }),
     }),
   ),
 });
@@ -223,6 +236,11 @@ function maestroRequest() {
       output_config: { format: { type: "json_schema", schema: fmt.schema } },
     },
     schema: SkillSchema,
+    tries: [
+      { route: "gemini", timeoutMs: 25_000 },
+      { route: "openrouter", timeoutMs: 60_000 },
+      { route: "free", timeoutMs: 100_000 },
+    ],
   };
 }
 
@@ -329,6 +347,11 @@ function thesisRequest() {
     },
     schema: ExtractionSchema,
     headers: { "x-fortune-consumer": "knox" },
+    tries: [
+      { route: "free", timeoutMs: 90_000 },
+      { route: "groq", timeoutMs: 20_000 },
+      { route: "free", timeoutMs: 60_000 },
+    ],
   };
 }
 
@@ -386,7 +409,8 @@ function tellarRequest() {
       );
       return said ? null : "empty reply";
     },
-    clientRoutes: TELLAR_ROUTES,
+    // No timeout of its own: the SDK default, 600 s.
+    tries: TELLAR_ROUTES.map((route) => ({ route, timeoutMs: 600_000 })),
   };
 }
 
@@ -415,7 +439,7 @@ function judge(spec, msg) {
   return spec.check(msg);
 }
 
-async function callOnce(spec, route, deadline) {
+async function callOnce(spec, route, deadline, tryTimeoutMs) {
   const body = {
     ...spec.body,
     metadata: {
@@ -425,7 +449,11 @@ async function callOnce(spec, route, deadline) {
     },
   };
   const started = Date.now();
-  const left = Math.max(1, deadline - started);
+  const cap = Math.min(deadline - started, tryTimeoutMs ?? Infinity);
+  const left = Math.max(1, cap);
+  const sdkTimeout = tryTimeoutMs
+    ? { "x-stainless-timeout": String(Math.trunc(tryTimeoutMs / 1000)) }
+    : {};
   try {
     const resp = await fetch(`${GATEWAY_URL}/v1/messages`, {
       method: "POST",
@@ -433,6 +461,7 @@ async function callOnce(spec, route, deadline) {
         "content-type": "application/json",
         "x-api-key": GATEWAY_TOKEN,
         "anthropic-version": "2023-06-01",
+        ...sdkTimeout,
         ...spec.headers,
       },
       body: JSON.stringify(body),
@@ -476,14 +505,14 @@ async function callOnce(spec, route, deadline) {
   }
 }
 
-// Tellar walks its own tier list, one pinned call each, until one answers.
+// An app walks its own list of tries until one gives a usable reply.
 async function callClientChain(spec, deadline) {
   const started = Date.now();
   const tries = [];
-  for (const route of spec.clientRoutes) {
+  for (const t of spec.tries) {
     if (Date.now() >= deadline) break;
-    const r = await callOnce(spec, route, deadline);
-    tries.push(`${route}:${r.ok ? "ok" : r.why}`);
+    const r = await callOnce(spec, t.route, deadline, t.timeoutMs);
+    tries.push(`${t.route}:${r.ok ? "ok" : r.why}`);
     if (r.ok) return { ...r, ms: Date.now() - started, tries };
   }
   return {
@@ -491,7 +520,7 @@ async function callClientChain(spec, deadline) {
     ms: Date.now() - started,
     served: null,
     ok: false,
-    why: "every tier failed",
+    why: "every try failed",
     tries,
   };
 }
@@ -514,9 +543,7 @@ async function runJob(job) {
   const deadline = Date.now() + TIMEOUT_MS;
   const r =
     job.route === "chain"
-      ? spec.clientRoutes
-        ? await callClientChain(spec, deadline)
-        : await callOnce(spec, "free", deadline)
+      ? await callClientChain(spec, deadline)
       : await callOnce(spec, job.route, deadline);
   const row = { at: new Date().toISOString(), ...job, ...r };
   if (OUT) appendFileSync(OUT, JSON.stringify(row) + "\n");
