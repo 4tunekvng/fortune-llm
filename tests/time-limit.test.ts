@@ -52,6 +52,17 @@ function hangingFetch() {
   );
 }
 
+/** Workers AI that never answers, so no free tier can win the race. */
+function hangingAi(
+  _model: string,
+  _input: unknown,
+  options?: { signal?: AbortSignal },
+) {
+  return new Promise((_, reject) => {
+    options?.signal?.addEventListener("abort", () => reject(options.signal?.reason));
+  });
+}
+
 function makeEnv(kv: MapKv, overrides: Record<string, unknown> = {}) {
   return {
     GATEWAY_TOKEN: "gateway-token",
@@ -172,6 +183,7 @@ describe("fetch handler with a slow tier", () => {
     const env = makeEnv(kv, {
       CHAIN_TIME_LIMIT_MS: "50",
       ANTHROPIC_API_KEY: "sk-ant-test",
+      AI: { run: hangingAi },
     });
 
     // Act
