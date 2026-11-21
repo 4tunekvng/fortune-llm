@@ -60,6 +60,9 @@ import {
   writeCache,
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
+import { extractOutputSchema } from "./structured-output.js";
+import { schemaMismatch } from "./schema-check.js";
+import { RequestShapeError } from "./upstream-error.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
 import {
   callerDeadline,
@@ -607,7 +610,10 @@ async function runChain(
         request,
         rawBody,
       );
-      if (tier !== "anthropic") await rejectEmptyReply(tier, resp);
+      if (tier !== "anthropic") {
+        await rejectEmptyReply(tier, resp);
+        await rejectOffSchemaReply(tier, resp, effectiveParsed);
+      }
       const headers = routeHeaders(resp, tier, chain, errors, skipped);
 
       // Only cache 200 JSON responses — SSE responses (which only appear
@@ -1166,6 +1172,67 @@ async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void
   const blocks = Array.isArray(msg.content) ? msg.content : [];
   const said = blocks.some((b) => b.type !== "text" || b.text.trim() !== "");
   if (!said) throw new Error(`${tier} returned an empty reply`);
+}
+
+/**
+ * A structured request (`output_config` json_schema) is answered by a JSON
+ * object in every text block, which the SDK's `messages.parse` parses and
+ * checks (a reply with only a tool call has no text to check). A free model that returns something else (prose, cut-off JSON,
+ * an enum value outside the list) would fail there after the whole wait, so
+ * throwing here moves the chain to the next tier instead. Streams are left
+ * alone, as in rejectEmptyReply.
+ */
+async function rejectOffSchemaReply(
+  tier: BackendKind,
+  resp: Response,
+  req: AnthropicMessagesRequest,
+): Promise<void> {
+  const format = extractOutputSchema(req);
+  const type = resp.headers.get("content-type") ?? "";
+  if (!format || resp.status !== 200 || !type.includes("application/json")) return;
+  let msg: AnthropicMessageResponse;
+  try {
+    msg = (await resp.clone().json()) as AnthropicMessageResponse;
+  } catch {
+    return;
+  }
+  const texts = (Array.isArray(msg.content) ? msg.content : []).flatMap((b) =>
+    b.type === "text" ? [b.text] : [],
+  );
+  // No text block (a tool call only) leaves the SDK's parsed_output null
+  // without an error, so only text the SDK will parse is checked.
+  const problem = firstSchemaProblem(texts, format.schema);
+  if (problem) {
+    throw new RequestShapeError(
+      `${tier} reply off schema: ${problem} (stop_reason ${msg.stop_reason})`,
+    );
+  }
+}
+
+function firstSchemaProblem(
+  texts: string[],
+  schema: Record<string, unknown>,
+): string | null {
+  for (const text of texts) {
+    let value: unknown;
+    try {
+      value = JSON.parse(unfenced(text));
+    } catch {
+      return "it is not JSON";
+    }
+    const miss = schemaMismatch(value, schema);
+    if (miss) return miss;
+  }
+  return null;
+}
+
+/**
+ * JSON wrapped in a Markdown code fence. Apps that read the reply leniently
+ * (Knox strips fences) accept it, so it is checked rather than refused.
+ */
+function unfenced(text: string): string {
+  const m = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
+  return m ? (m[1] as string) : text;
 }
 
 async function invokeTier(

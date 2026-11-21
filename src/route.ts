@@ -21,11 +21,10 @@
  *                                                     (gemini 2.5 flash has 1M+ context;
  *                                                      OpenRouter's free Llama 4 has 256k+;
  *                                                      workers-ai's gemma-4 caps lower)
- *   - has output_config      →  [anthropic]           (json_schema structured output is an
- *                                                      Anthropic-native SDK feature — free
- *                                                      backends don't understand the field
- *                                                      and return code-fenced JSON that the
- *                                                      SDK's text parser then chokes on)
+ *   - has output_config      →  the same chains       (each free tier gets the schema in
+ *                                                      its own form; a reply off the schema
+ *                                                      counts as a failure and falls through,
+ *                                                      see schema-check.ts)
  *
  * When `options.anthropicFallback === true` (i.e. ANTHROPIC_API_KEY is
  * configured on the worker), Anthropic is appended as the last-resort

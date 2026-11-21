@@ -12,7 +12,7 @@ POST /v1/messages   decideRoute(body, { anthropicFallback })                    
                 │ default / tools[]     →  [groq, workers-ai, gemini, openrouter,*anthropic]│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
-                │ output_config (JSON)  →  [anthropic]   (free tiers can't speak it)        │
+                │ output_config (JSON)  →  same chains; a reply off the schema falls through│
                 │                                                                            │
                 │ metadata.fortune_route="anthropic"  →  [anthropic]   (force paid)         │
                 │ metadata.fortune_route="free"       →  free chain only (no paid fallback) │
@@ -91,6 +91,19 @@ x-fortune-llm-cache-age-s:           seconds since the cached entry was written 
 x-fortune-llm-rate-limit:            count/limit (only on 429 responses)
 ```
 
+## Structured output
+
+A request with `output_config.format.type = "json_schema"` (what the SDK's
+`messages.parse` sends) goes through the same free chain as any other
+request, with paid Anthropic last when configured; it is not sent to paid
+Anthropic only. Each free tier gets the schema in its own form
+(`response_format` for the OpenAI-style tiers, `responseSchema` for Gemini).
+Every text block of a free tier's reply must parse as JSON and match the
+schema (`src/schema-check.ts`); a reply that doesn't, including one cut off
+by `max_tokens`, counts as that tier failing and the chain moves on, so the
+caller never waits for a reply its own parser will throw away. Length and
+range limits are not checked: the SDK sends those as description hints and
+re-checks them itself.
 ## Time limits
 
 A free tier that hangs can't hold a request: each free tier call runs under
