@@ -185,7 +185,7 @@ describe("fetch handler with a slow tier", () => {
   it("hands Workers AI the abort signal", async () => {
     // Arrange
     const kv = new MapKv();
-    const run = vi.fn(async () => ({ response: "hello" }));
+    const run = vi.fn(async (..._args: unknown[]) => ({ response: "hello" }));
     const env = makeEnv(kv, { AI: { run } });
 
     // Act
