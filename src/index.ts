@@ -201,6 +201,16 @@ function statsFlusher(
   };
 }
 
+/**
+ * The /stats label for a request: the consumer header, marked `dev-` for
+ * the development token so local runs and evals never count as the
+ * production app they name.
+ */
+function statsConsumer(request: Request, dev: boolean): string | null {
+  const name = request.headers.get("x-fortune-consumer");
+  return name && dev ? `dev-${name}`.slice(0, 32) : name;
+}
+
 function warnIfCircuitMissing(env: Env): void {
   if (env.CIRCUIT || circuitMissingWarned) return;
   circuitMissingWarned = true;
@@ -318,19 +328,17 @@ function handleHealthz(env: Env): Response {
 async function applyRateLimit(
   request: Request,
   env: Env,
+  dev: boolean,
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Promise<Response | null> {
   const globalRateLimit = resolveRateLimitPerMin(env.RATE_LIMIT_PER_MIN);
   if (globalRateLimit === 0) return null;
-  const { scope, kind } = getRateLimitScope(request);
+  const envBag = env as unknown as Record<string, string | undefined>;
+  const { scope, kind } = getRateLimitScope(request, envBag, dev);
   const effectiveLimit =
     kind === "consumer"
-      ? resolveConsumerRateLimit(
-          scope,
-          globalRateLimit,
-          env as unknown as Record<string, string | undefined>,
-        )
+      ? resolveConsumerRateLimit(scope, globalRateLimit, envBag)
       : globalRateLimit;
   const decision = await checkRateLimit(scope, effectiveLimit, env.CIRCUIT);
   if (decision.allowed) return null;
@@ -985,14 +993,6 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    const statsEvents: StatsEvent[] = [];
-    const flushStats = statsFlusher(
-      env,
-      ctx,
-      request.headers.get("x-fortune-consumer"),
-      statsEvents,
-    );
-
     const nonApi = routeOutsideApi(request, url, env);
     if (nonApi) return nonApi;
 
@@ -1001,9 +1001,17 @@ export default {
       return jsonError(auth.status, "authentication_error", auth.message);
     }
 
+    const statsEvents: StatsEvent[] = [];
+    const flushStats = statsFlusher(
+      env,
+      ctx,
+      statsConsumer(request, auth.dev),
+      statsEvents,
+    );
     const rateLimitResp = await applyRateLimit(
       request,
       env,
+      auth.dev,
       statsEvents,
       flushStats,
     );

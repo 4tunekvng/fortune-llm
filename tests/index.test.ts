@@ -787,4 +787,67 @@ describe("fetch handler routing before the chain", () => {
       "app-a",
     );
   });
+
+  it("labels development-token stats apart from the app they name", async () => {
+    // Arrange
+    const recordEvents = vi.fn(async () => {});
+    const statsEnv = {
+      ...env,
+      GATEWAY_DEV_TOKEN: "dev-token",
+      STATS_DO: { idFromName: () => "id", get: () => ({ recordEvents }) },
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "dev-token", "x-fortune-consumer": "knox" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    // Act
+    await worker.fetch(req, statsEnv as never, ctx as never);
+
+    // Assert
+    expect(recordEvents).toHaveBeenCalledWith(expect.anything(), "dev-knox");
+  });
+
+  it("rate-limits the development token by IP when it names an app", async () => {
+    // Arrange: knox is registered with room to spare; the IP bucket is full.
+    const store = new Map<string, string>([
+      [`rate:5.6.7.8:${Math.floor(Date.now() / 60_000)}`, "1"],
+    ]);
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+    };
+    const limitEnv = {
+      ...env,
+      GATEWAY_DEV_TOKEN: "dev-token",
+      RATE_LIMIT_PER_MIN: "1",
+      RATE_LIMIT_PER_MIN_KNOX: "100",
+      CIRCUIT: kv,
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": "dev-token",
+        "x-fortune-consumer": "knox",
+        "cf-connecting-ip": "5.6.7.8",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    // Act
+    const resp = await worker.fetch(req, limitEnv as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(429);
+    expect(resp.headers.get("x-fortune-llm-rate-scope")).toBe("ip:5.6.7.8");
+  });
 });
