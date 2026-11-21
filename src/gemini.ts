@@ -49,6 +49,7 @@ export const DEFAULT_GEMINI_FALLBACK_MODELS = "gemini-flash-lite-latest,gemini-f
 export interface CallGeminiOptions {
   apiKey: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 /**
@@ -405,6 +406,7 @@ export async function callGeminiWithRotation(
   model: string,
   req: AnthropicMessagesRequest,
   isKeyError: (err: unknown) => boolean,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (keys.length === 0) {
     throw new Error("GEMINI_API_KEY not configured");
@@ -413,7 +415,7 @@ export async function callGeminiWithRotation(
   let lastQuotaError: unknown = null;
   for (const apiKey of shuffled) {
     try {
-      return await callGemini({ apiKey, model }, req);
+      return await callGemini({ apiKey, model, signal }, req);
     } catch (err) {
       if (isKeyError(err)) {
         lastQuotaError = err;
@@ -446,6 +448,7 @@ export async function callGeminiModels(
   models: string[],
   req: AnthropicMessagesRequest,
   isKeyError: (err: unknown) => boolean,
+  signal?: AbortSignal,
 ): Promise<{ resp: Response; model: string }> {
   // A quota error wins the final throw, so the tier's circuit trips only when
   // a model was really out of quota, not when every model was just missing.
@@ -453,7 +456,10 @@ export async function callGeminiModels(
   let lastError: unknown = null;
   for (const model of models) {
     try {
-      return { resp: await callGeminiWithRotation(keys, model, req, isKeyError), model };
+      return {
+        resp: await callGeminiWithRotation(keys, model, req, isKeyError, signal),
+        model,
+      };
     } catch (err) {
       if (!isKeyError(err) && !/Gemini 404/.test(err instanceof Error ? err.message : String(err))) throw err;
       lastError = err;
@@ -512,6 +518,7 @@ export async function callGemini(
       "x-goog-api-key": opts.apiKey,
     },
     body: JSON.stringify(body),
+    signal: opts.signal,
   });
 
   if (!upstream.ok) {

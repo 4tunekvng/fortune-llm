@@ -41,7 +41,11 @@ import {
 } from "./sse.js";
 
 export interface AiBinding {
-  run(model: string, input: unknown): Promise<unknown>;
+  run(
+    model: string,
+    input: unknown,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
 }
 
 export function flattenContent(content: AnthropicMessage["content"]): string {
@@ -277,8 +281,10 @@ export async function callWorkersAi(
   ai: AiBinding,
   model: string,
   req: AnthropicMessagesRequest,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const input = buildWorkersAiInput(req);
+  const options = signal ? { signal } : undefined;
   const wantsStream = Boolean(input.stream);
   const hasTools = Array.isArray(input.tools) && input.tools.length > 0;
 
@@ -287,7 +293,11 @@ export async function callWorkersAi(
   // re-encoder simple and avoids partial-JSON parsing in tool args.
   if (hasTools) {
     const nonStreamInput = { ...input, stream: false };
-    const raw = (await ai.run(model, nonStreamInput)) as WorkersAiChatResponse;
+    const raw = (await ai.run(
+      model,
+      nonStreamInput,
+      options,
+    )) as WorkersAiChatResponse;
 
     // Tool-silence detection. Opt-in via metadata.fortune_require_tools=true.
     // Gemma 4 26B A4B supports native tool calling, but consumers that need
@@ -319,7 +329,7 @@ export async function callWorkersAi(
     });
   }
 
-  const raw = await ai.run(model, input);
+  const raw = await ai.run(model, input, options);
   if (wantsStream) {
     if (!(raw instanceof ReadableStream)) {
       throw new Error(`Workers AI did not return a stream for model ${model}`);

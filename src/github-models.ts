@@ -27,6 +27,7 @@ const GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions";
 export interface CallGitHubModelsOptions {
   apiKey: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 export async function callGitHubModels(
@@ -39,6 +40,7 @@ export async function callGitHubModels(
       url: GITHUB_MODELS_URL,
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
     },
     req,
   );

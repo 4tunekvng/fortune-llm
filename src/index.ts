@@ -55,6 +55,13 @@ import {
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
+import {
+  chainBudgetMs,
+  tierLimitMs,
+  TierTimeoutError,
+  TIMEOUT_TRIP_MS,
+  withTimeLimit,
+} from "./time-limit.js";
 import type { DailyStats, StatsEvent } from "./stats-do.js";
 import type { CachedResponse } from "./cache-do.js";
 // Re-export the DO classes so the Workers runtime can find them.
@@ -108,6 +115,8 @@ interface Env {
   CACHE_TTL_SECONDS?: string;
   /** Per-IP request cap per minute. Default 200. Set to 0 to disable. */
   RATE_LIMIT_PER_MIN?: string;
+  /** Time all free tiers of one request may take together. Default 80 s. */
+  CHAIN_TIME_LIMIT_MS?: string;
   /**
    * Durable Object that owns the stats counters. Atomic increments via
    * SQL UPSERT inside the DO actor — no lost updates, no read lag.
@@ -549,6 +558,9 @@ async function runChain(
 ): Promise<ChainResult> {
   const errors: Array<{ tier: BackendKind; error: string }> = [];
   const skipped: Array<{ tier: BackendKind; until: number }> = [];
+  const clientTimeout = request.headers.get("x-stainless-timeout");
+  const deadline =
+    Date.now() + chainBudgetMs(env.CHAIN_TIME_LIMIT_MS, clientTimeout);
 
   for (let i = 0; i < chain.tiers.length; i++) {
     const tier = chain.tiers[i];
@@ -565,9 +577,16 @@ async function runChain(
       }
     }
 
+    const left = deadline - Date.now();
+    if (tier !== "anthropic" && left <= 0) {
+      errors.push({ tier, error: `${tier} not tried: time budget spent` });
+      continue;
+    }
+
     try {
-      const resp = await invokeTier(
+      const resp = await invokeTimed(
         tier,
+        left,
         env,
         effectiveParsed,
         request,
@@ -624,6 +643,30 @@ async function runChain(
   }
 
   return { ok: false, errors, skipped };
+}
+
+/**
+ * One tier call under its time limit: the tier's own limit or what is left
+ * of the chain budget, whichever is shorter. Paid Anthropic is the last
+ * resort and runs without either.
+ */
+function invokeTimed(
+  tier: BackendKind,
+  left: number,
+  env: Env,
+  parsed: AnthropicMessagesRequest,
+  request: Request,
+  rawBody: string,
+): Promise<Response> {
+  if (tier === "anthropic") return invokeTier(tier, env, parsed, request, rawBody);
+  const own = tierLimitMs(tier, env as unknown as Record<string, unknown>);
+  const ownLimit = own !== undefined && own <= left;
+  const ms = ownLimit ? own : left;
+  return withTimeLimit(
+    (signal) => invokeTier(tier, env, parsed, request, rawBody, signal),
+    ms,
+    () => new TierTimeoutError(tier, ms, ownLimit),
+  );
 }
 
 // Copies the tier's headers and adds the gateway's routing diagnostics.
@@ -732,7 +775,15 @@ async function tripOnQuota(
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
-  const ms = tripMsFor(err, tripDurationMs);
+  // A tier that ran out its own limit (about 3x the slowest reply measured)
+  // is hanging, so skip it briefly; a call the chain budget cut short says
+  // nothing about the tier.
+  const ms =
+    err instanceof TierTimeoutError
+      ? err.ownLimit
+        ? TIMEOUT_TRIP_MS
+        : 0
+      : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
@@ -1045,7 +1096,7 @@ const SINGLE_MODEL_TIERS = {
       keyName: keyof Env;
       model: (env: Env) => string;
       call: (
-        opts: { apiKey: string; model: string },
+        opts: { apiKey: string; model: string; signal?: AbortSignal },
         req: AnthropicMessagesRequest,
       ) => Promise<Response>;
     }
@@ -1105,10 +1156,11 @@ async function invokeTier(
   parsed: AnthropicMessagesRequest,
   request: Request,
   rawBody: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (tier === "workers-ai") {
     const model = env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it";
-    const resp = await callWorkersAi(env.AI, model, parsed);
+    const resp = await callWorkersAi(env.AI, model, parsed, signal);
     return withTierHeaders(resp, { "x-fortune-llm-model": model });
   }
   // BYOK: every non-workers-ai tier supports per-request key override via
@@ -1135,6 +1187,7 @@ async function invokeTier(
       models,
       parsed,
       isKeyError,
+      signal,
     );
     return withTierHeaders(
       resp,
@@ -1152,7 +1205,7 @@ async function invokeTier(
     const resolved = resolveKey(tier, env[spec.keyName]);
     if (!resolved) throw new Error(`${spec.keyName} not configured`);
     const model = spec.model(env);
-    const resp = await spec.call({ apiKey: resolved.key, model }, parsed);
+    const resp = await spec.call({ apiKey: resolved.key, model, signal }, parsed);
     return withTierHeaders(
       resp,
       { "x-fortune-llm-model": model },
@@ -1164,7 +1217,7 @@ async function invokeTier(
     if (!resolved) throw new Error("OPENROUTER_API_KEY not configured");
     const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
     const resp = await callOpenRouter(
-      { apiKey: resolved.key, models },
+      { apiKey: resolved.key, models, signal },
       parsed,
     );
     return withTierHeaders(

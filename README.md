@@ -91,6 +91,22 @@ x-fortune-llm-cache-age-s:           seconds since the cached entry was written 
 x-fortune-llm-rate-limit:            count/limit (only on 429 responses)
 ```
 
+## Time limits
+
+A free tier that hangs can't hold a request: each free tier call runs under
+a time limit and is cancelled (its `fetch`, or Workers AI's `AI.run`, gets an
+abort signal) when the limit runs out, and the chain moves to the next tier.
+
+| Limit | Default | Notes |
+|---|---|---|
+| Own limit, fast tiers (groq, cerebras, mistral, github-models, gemini) | 20 s | About 3x the slowest reply measured on 2026-11-21 (gemini, 6.8 s for an 8K-token curriculum). Override with `TIER_TIME_LIMIT_MS_<TIER>`, e.g. `TIER_TIME_LIMIT_MS_GEMINI`. A tier that runs out its own limit is skipped for 60 s. |
+| Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s and 64 s; only the chain budget bounds them. |
+| Chain budget, all free tiers together | 80 s | `CHAIN_TIME_LIMIT_MS`. Cut to the caller's own timeout less 2 s when the SDK sends `X-Stainless-Timeout`, so the caller gets an answer before it gives up. Tiers left when it is spent are not tried. |
+| Paid Anthropic | none | The last resort runs as before, whatever is left. |
+
+For a stream the limit covers the wait for the response to start; once it
+has started it is never cut.
+
 ## Response cache
 
 Exact-match KV cache keyed on the request hash. A second identical
