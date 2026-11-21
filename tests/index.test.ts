@@ -346,3 +346,140 @@ describe("fetch handler when CACHE_DO RPC fails", () => {
     expect(failingStub.write).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("fetch handler routing before the chain", () => {
+  const env = {
+    GATEWAY_TOKEN: "gateway-token",
+    GATEWAY_DEV_TOKEN: "dev-token",
+    CACHE_TTL_SECONDS: "0",
+    RATE_LIMIT_PER_MIN: "0",
+    AI: { run: async () => ({ response: "hello from workers ai" }) },
+  };
+
+  function call(path: string, init: RequestInit, extra = {}) {
+    const req = new Request(`https://gw.test${path}`, init);
+    return worker.fetch(req, { ...env, ...extra } as never, ctx as never);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("answers a preflight with 204", async () => {
+    const resp = await call("/v1/messages", { method: "OPTIONS" });
+
+    expect(resp.status).toBe(204);
+  });
+
+  it("answers 404 outside /v1/", async () => {
+    const resp = await call("/nope", { method: "GET" });
+
+    expect(resp.status).toBe(404);
+    expect(await resp.json()).toMatchObject({
+      error: { type: "not_found", message: "No route for GET /nope" },
+    });
+  });
+
+  it("answers 401 without a token", async () => {
+    const resp = await call("/v1/messages", { method: "POST", body: "{}" });
+
+    expect(resp.status).toBe(401);
+  });
+
+  it("answers 501 for an Anthropic-only endpoint with no paid key", async () => {
+    const resp = await call("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token" },
+      body: "{}",
+    });
+
+    expect(resp.status).toBe(501);
+    expect(await resp.json()).toMatchObject({
+      error: { type: "not_implemented" },
+    });
+  });
+
+  it("refuses the development token on an Anthropic-only endpoint", async () => {
+    const resp = await call(
+      "/v1/messages/count_tokens",
+      { method: "POST", headers: { "x-api-key": "dev-token" }, body: "{}" },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.status).toBe(403);
+  });
+
+  it("forwards an Anthropic-only endpoint when the paid key is set", async () => {
+    const upstream = vi.fn(async () => new Response('{"input_tokens":3}'));
+    vi.stubGlobal("fetch", upstream);
+
+    const resp = await call(
+      "/v1/messages/count_tokens",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body: "{}" },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ input_tokens: 3 });
+    expect(resp.headers.get("access-control-allow-origin")).toBe("*");
+  });
+
+  it("answers 502 when the Anthropic forward throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
+
+    const resp = await call(
+      "/v1/messages/count_tokens",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body: "{}" },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.status).toBe(502);
+    expect(await resp.json()).toMatchObject({
+      error: { type: "upstream_error" },
+    });
+  });
+
+  it("answers 400 for a body that is not JSON", async () => {
+    const resp = await call("/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token" },
+      body: "not json",
+    });
+
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toMatchObject({
+      error: { type: "invalid_request_error", message: "Body must be valid JSON." },
+    });
+  });
+
+  it("flushes stats once with the consumer header", async () => {
+    const recordEvents = vi.fn(async () => {});
+    const waitUntil = vi.fn();
+    const statsEnv = {
+      ...env,
+      STATS_DO: { idFromName: () => "id", get: () => ({ recordEvents }) },
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "x-fortune-consumer": "app-a" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    const resp = await worker.fetch(
+      req,
+      statsEnv as never,
+      { ...ctx, waitUntil } as never,
+    );
+
+    expect(resp.status).toBe(200);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    expect(recordEvents).toHaveBeenCalledWith(
+      expect.arrayContaining([{ kind: "request" }]),
+      "app-a",
+    );
+  });
+});
