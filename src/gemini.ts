@@ -244,6 +244,20 @@ function sanitizeSchemaNode(node: unknown): unknown {
   // Its `enum` takes strings only, so a string const becomes a one-value enum.
   const constant = (node as Record<string, unknown>).const;
   if (typeof constant === "string" && !("enum" in out)) out.enum = [constant];
+  // The SDK sends `enum` with no `type`; Gemini needs a type on every field
+  // and applies `enum` to strings only.
+  const strings = Array.isArray(out.enum) &&
+    out.enum.every((v) => typeof v === "string");
+  if (strings && !("type" in out)) out.type = "string";
+  // `.nullable()` arrives as `type: [T, "null"]`; Gemini takes one type plus
+  // `nullable: true`.
+  if (Array.isArray(out.type) && out.type.includes("null")) {
+    const rest = out.type.filter((t) => t !== "null");
+    if (rest.length === 1) {
+      out.type = rest[0];
+      out.nullable = true;
+    }
+  }
   return out;
 }
 

@@ -249,15 +249,34 @@ describe("sanitizeJsonSchemaForGemini", () => {
     expect(props.files).toEqual({ type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 });
   });
 
-  it("keeps a const as a one-value enum, so the model must still pick it", () => {
-    // Arrange: z.literal("note") arrives from the SDK as a const.
-    const schema = { type: "string", const: "note" };
+  it("turns the SDK's enum, const and nullable output into Gemini's form", () => {
+    // Arrange: verbatim zodOutputFormat output from @anthropic-ai/sdk 1.10.0 for
+    // z.object({ kind: z.enum(["a","b"]), tag: z.literal("x"),
+    //            n: z.number().nullable() }).
+    const schema = {
+      type: "object",
+      properties: {
+        kind: { enum: ["a", "b"] },
+        tag: { const: "x" },
+        n: { type: ["number", "null"] },
+      },
+      additionalProperties: false,
+      required: ["kind", "tag", "n"],
+    };
 
     // Act
     const out = sanitizeJsonSchemaForGemini(schema);
 
     // Assert
-    expect(out).toEqual({ type: "string", enum: ["note"] });
+    expect(out).toEqual({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["a", "b"] },
+        tag: { type: "string", enum: ["x"] },
+        n: { type: "number", nullable: true },
+      },
+      required: ["kind", "tag", "n"],
+    });
   });
 });
 
