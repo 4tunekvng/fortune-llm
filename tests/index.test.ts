@@ -190,6 +190,47 @@ describe("fetch handler with a structured request", () => {
     );
   });
 
+  it("keeps a reply that only calls a tool", async () => {
+    // Arrange: the SDK leaves parsed_output null for a tool-only reply and
+    // does not throw, so the gateway must pass it on.
+    const toolOnly = {
+      id: "chatcmpl-4",
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "lookup", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(toolOnly)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+    expect(await resp.json()).toMatchObject({
+      content: [{ type: "tool_use", name: "lookup" }],
+    });
+  });
+
   it("keeps the first tier when its reply matches", async () => {
     // Arrange
     const inSchema = {

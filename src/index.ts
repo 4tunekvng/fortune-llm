@@ -1107,7 +1107,7 @@ async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void
 /**
  * A structured request (`output_config` json_schema) is answered by a JSON
  * object in every text block, which the SDK's `messages.parse` parses and
- * checks. A free model that returns something else (prose, cut-off JSON,
+ * checks (a reply with only a tool call has no text to check). A free model that returns something else (prose, cut-off JSON,
  * an enum value outside the list) would fail there after the whole wait, so
  * throwing here moves the chain to the next tier instead. Streams are left
  * alone, as in rejectEmptyReply.
@@ -1129,8 +1129,9 @@ async function rejectOffSchemaReply(
   const texts = (Array.isArray(msg.content) ? msg.content : []).flatMap((b) =>
     b.type === "text" ? [b.text] : [],
   );
-  const problem =
-    texts.length === 0 ? "it has no text" : firstSchemaProblem(texts, format.schema);
+  // No text block (a tool call only) leaves the SDK's parsed_output null
+  // without an error, so only text the SDK will parse is checked.
+  const problem = firstSchemaProblem(texts, format.schema);
   if (problem) {
     throw new Error(
       `${tier} reply off schema: ${problem} (stop_reason ${msg.stop_reason})`,
