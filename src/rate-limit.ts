@@ -83,7 +83,9 @@ export function getRateLimitScope(
 ): { scope: string; kind: "consumer" | "ip" } {
   const raw = request.headers.get("x-fortune-consumer");
   const registered =
-    raw !== null && CONSUMER_RE.test(raw) && envBag[consumerLimitVar(raw)] !== undefined;
+    raw !== null &&
+    CONSUMER_RE.test(raw) &&
+    envBag[consumerLimitVar(raw)] !== undefined;
   if (!dev && raw && registered) {
     return { scope: raw.toLowerCase(), kind: "consumer" };
   }
