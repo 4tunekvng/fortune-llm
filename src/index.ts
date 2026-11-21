@@ -136,6 +136,56 @@ type CacheDOStub = {
 
 let circuitMissingWarned = false;
 
+function statsStub(env: Env): StatsDOStub | null {
+  return env.STATS_DO
+    ? (env.STATS_DO.get(
+        env.STATS_DO.idFromName("stats-singleton"),
+      ) as unknown as StatsDOStub)
+    : null;
+}
+
+function cacheStub(env: Env): CacheDOStub | null {
+  return env.CACHE_DO
+    ? (env.CACHE_DO.get(
+        env.CACHE_DO.idFromName("cache-singleton"),
+      ) as unknown as CacheDOStub)
+    : null;
+}
+
+/**
+ * Stats events accumulate over the lifetime of a request and are flushed
+ * to the StatsDO via ctx.waitUntil so the write doesn't add latency to the
+ * response path. The DO serializes increments through a single actor — no
+ * read-modify-write races, no KV cache lag. The consumer header is captured
+ * once at request entry so every event lands in the same per-consumer
+ * bucket even if the header is removed or rewritten mid-flow.
+ */
+function statsFlusher(
+  env: Env,
+  ctx: ExecutionContext,
+  consumerHeader: string | null,
+  statsEvents: StatsEvent[],
+): () => void {
+  return () => {
+    if (statsEvents.length === 0) return;
+    const stub = statsStub(env);
+    if (stub) {
+      const batch = statsEvents.slice();
+      ctx.waitUntil(stub.recordEvents(batch, consumerHeader));
+    }
+    statsEvents.length = 0;
+  };
+}
+
+function warnIfCircuitMissing(env: Env): void {
+  if (env.CIRCUIT || circuitMissingWarned) return;
+  circuitMissingWarned = true;
+  console.warn(
+    "fortune-llm: CIRCUIT KV namespace not bound — circuit breaker disabled. " +
+      "Run `wrangler kv namespace create CIRCUIT` and add the id to wrangler.toml.",
+  );
+}
+
 // ── Route handlers ───────────────────────────────────────────────────────────
 
 async function handleStats(request: Request, env: Env): Promise<Response> {
@@ -151,11 +201,7 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
       statsAuth.message,
     );
   }
-  const stub = env.STATS_DO
-    ? (env.STATS_DO.get(
-        env.STATS_DO.idFromName("stats-singleton"),
-      ) as unknown as StatsDOStub)
-    : null;
+  const stub = statsStub(env);
   if (!stub) {
     return new Response(
       JSON.stringify({ error: "STATS_DO binding not configured" }),
@@ -763,6 +809,86 @@ function chainExhaustedResponse(
   );
 }
 
+/**
+ * Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
+ * specific and don't translate cleanly. Only forward when Anthropic is
+ * configured; otherwise reject so callers see the policy clearly.
+ */
+async function handleAnthropicOnly(
+  request: Request,
+  url: URL,
+  rawBody: string,
+  dev: boolean,
+  env: Env,
+): Promise<Response> {
+  if (dev) return devTokenPaidRefusal();
+  if (!env.ANTHROPIC_API_KEY) {
+    return jsonError(
+      501,
+      "not_implemented",
+      `Endpoint ${url.pathname} is Anthropic-only and ANTHROPIC_API_KEY` +
+        ` is not configured. Free backends only support /v1/messages.`,
+    );
+  }
+  try {
+    return withCors(
+      await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
+    );
+  } catch (err) {
+    console.error("fortune-llm: Anthropic upstream failed:", errorMessage(err));
+    return jsonError(
+      502,
+      "upstream_error",
+      "Anthropic upstream failed. Please try again.",
+    );
+  }
+}
+
+function parseMessagesBody(
+  rawBody: string,
+): AnthropicMessagesRequest | Response {
+  let parsed: AnthropicMessagesRequest;
+  try {
+    parsed = JSON.parse(rawBody) as AnthropicMessagesRequest;
+  } catch {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      "Body must be valid JSON.",
+    );
+  }
+  return validateMessages(parsed) ?? parsed;
+}
+
+/** Routes served before /v1/ auth: stats, health, preflight and 404. */
+function routeOutsideApi(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> | Response | null {
+  // GET /stats — auth-protected observability (strongly consistent via DO).
+  if (request.method === "GET" && url.pathname === "/stats") {
+    return handleStats(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/healthz") {
+    return handleHealthz(env);
+  }
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+
+  if (!url.pathname.startsWith("/v1/")) {
+    return jsonError(
+      404,
+      "not_found",
+      `No route for ${request.method} ${url.pathname}`,
+    );
+  }
+  return null;
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 
 export default {
@@ -772,49 +898,16 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    // Stats events accumulate over the lifetime of this request and
-    // are flushed to the StatsDO via ctx.waitUntil so the write doesn't
-    // add latency to the response path. The DO serializes increments
-    // through a single actor — no read-modify-write races, no KV cache lag.
     const statsEvents: StatsEvent[] = [];
-    // Consumer identity: captured once at request entry so every stats
-    // event lands in the same per-consumer bucket even if the header is
-    // removed or rewritten mid-flow.
-    const consumerHeader = request.headers.get("x-fortune-consumer");
-    const flushStats = () => {
-      if (statsEvents.length === 0) return;
-      const stub = env.STATS_DO
-        ? (env.STATS_DO.get(
-            env.STATS_DO.idFromName("stats-singleton"),
-          ) as unknown as StatsDOStub)
-        : null;
-      if (stub) {
-        const batch = statsEvents.slice();
-        ctx.waitUntil(stub.recordEvents(batch, consumerHeader));
-      }
-      statsEvents.length = 0;
-    };
+    const flushStats = statsFlusher(
+      env,
+      ctx,
+      request.headers.get("x-fortune-consumer"),
+      statsEvents,
+    );
 
-    // GET /stats — auth-protected observability (strongly consistent via DO).
-    if (request.method === "GET" && url.pathname === "/stats") {
-      return handleStats(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/healthz") {
-      return handleHealthz(env);
-    }
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-
-    if (!url.pathname.startsWith("/v1/")) {
-      return jsonError(
-        404,
-        "not_found",
-        `No route for ${request.method} ${url.pathname}`,
-      );
-    }
+    const nonApi = routeOutsideApi(request, url, env);
+    if (nonApi) return nonApi;
 
     const auth = authenticate(request, env.GATEWAY_TOKEN, env.GATEWAY_DEV_TOKEN);
     if (!auth.ok) {
@@ -833,45 +926,12 @@ export default {
     if (bodyResult instanceof Response) return bodyResult;
     const { rawBody } = bodyResult;
 
-    // Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
-    // specific and don't translate cleanly. Only forward when Anthropic
-    // is configured; otherwise reject so callers see the policy clearly.
     if (!(request.method === "POST" && url.pathname === "/v1/messages")) {
-      if (auth.dev) return devTokenPaidRefusal();
-      if (!env.ANTHROPIC_API_KEY) {
-        return jsonError(
-          501,
-          "not_implemented",
-          `Endpoint ${url.pathname} is Anthropic-only and ANTHROPIC_API_KEY` +
-            ` is not configured. Free backends only support /v1/messages.`,
-        );
-      }
-      try {
-        return withCors(
-          await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
-        );
-      } catch (err) {
-        console.error("fortune-llm: Anthropic upstream failed:", errorMessage(err));
-        return jsonError(
-          502,
-          "upstream_error",
-          "Anthropic upstream failed. Please try again.",
-        );
-      }
+      return handleAnthropicOnly(request, url, rawBody, auth.dev, env);
     }
 
-    let parsed: AnthropicMessagesRequest;
-    try {
-      parsed = JSON.parse(rawBody) as AnthropicMessagesRequest;
-    } catch {
-      return jsonError(
-        400,
-        "invalid_request_error",
-        "Body must be valid JSON.",
-      );
-    }
-    const validationErr = validateMessages(parsed);
-    if (validationErr) return validationErr;
+    const parsed = parseMessagesBody(rawBody);
+    if (parsed instanceof Response) return parsed;
     const route = (parsed.metadata as { fortune_route?: string } | undefined)
       ?.fortune_route;
     if (auth.dev && route === "anthropic") return devTokenPaidRefusal();
@@ -893,17 +953,13 @@ export default {
     // Cache lives in a DO actor — reads/writes are strongly consistent
     // so rapid-fire identical requests hit cache immediately. Fall back to
     // KV cache when CACHE_DO isn't present (local dev without the migration).
-    const cacheStub: CacheDOStub | null = env.CACHE_DO
-      ? (env.CACHE_DO.get(
-          env.CACHE_DO.idFromName("cache-singleton"),
-        ) as unknown as CacheDOStub)
-      : null;
+    const cacheDo = cacheStub(env);
     let cacheKey: string | null = null;
     if (cacheEligible) {
       cacheKey = await computeCacheKey(parsed);
       const hit = await lookupAndServeCache(
         cacheKey,
-        cacheStub,
+        cacheDo,
         env.CIRCUIT,
         wantsStream,
         statsEvents,
@@ -924,13 +980,7 @@ export default {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
     });
 
-    if (!env.CIRCUIT && !circuitMissingWarned) {
-      circuitMissingWarned = true;
-      console.warn(
-        "fortune-llm: CIRCUIT KV namespace not bound — circuit breaker disabled. " +
-          "Run `wrangler kv namespace create CIRCUIT` and add the id to wrangler.toml.",
-      );
-    }
+    warnIfCircuitMissing(env);
     const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
 
     const result = await runChain(
@@ -942,7 +992,7 @@ export default {
       cacheEligible,
       cacheKey,
       wantsStream,
-      cacheStub,
+      cacheDo,
       cacheTtl,
       tripDurationMs,
       statsEvents,
