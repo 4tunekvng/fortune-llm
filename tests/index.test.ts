@@ -187,6 +187,44 @@ describe("fetch handler with malformed message entries", () => {
     expect(resp.status).toBe(400);
   });
 
+  it("answers 400 when tools is not an array", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      tools: { a: 1 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("answers 400 for a null tool", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      tools: [null],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
+  it("answers 400 for an image block with no source", async () => {
+    // Act
+    const resp = await send({
+      model: "m",
+      max_tokens: 8,
+      messages: [{ role: "user", content: [{ type: "image" }] }],
+    });
+
+    // Assert
+    expect(resp.status).toBe(400);
+  });
+
   it("still serves block-array content", async () => {
     // Act
     const resp = await send({

@@ -372,11 +372,16 @@ function validateMessages(
   // Routing and every translator read `m.content` and `block.type`, so a
   // null entry would throw out of the handler instead of returning a 400.
   const isBlock = (b: unknown) => typeof b === "object" && b !== null;
+  // Translators read an image block's `source` directly.
+  const isContentBlock = (b: unknown) =>
+    isBlock(b) &&
+    ((b as { type?: unknown }).type !== "image" ||
+      isBlock((b as { source?: unknown }).source));
   const badMessage = parsed.messages.some(
     (m) =>
       !isBlock(m) ||
       (typeof m.content !== "string" &&
-        !(Array.isArray(m.content) && m.content.every(isBlock))),
+        !(Array.isArray(m.content) && m.content.every(isContentBlock))),
   );
   const badSystem =
     Array.isArray(parsed.system) && !parsed.system.every(isBlock);
@@ -385,6 +390,18 @@ function validateMessages(
       400,
       "invalid_request_error",
       "Each message needs string or array content of block objects.",
+    );
+  }
+  // Every tool translator maps over `tools`, so a bad shape would fail each
+  // tier and come back as a 503 instead of the caller's 400.
+  if (
+    parsed.tools !== undefined &&
+    !(Array.isArray(parsed.tools) && parsed.tools.every(isBlock))
+  ) {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      "Field 'tools' must be an array of tool objects.",
     );
   }
   if (
