@@ -387,6 +387,96 @@ describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
     expect(isQuotaError(thrown)).toBe(false);
   });
 
+  it("writes out the SDK's $ref to a nested object in place", () => {
+    // Arrange: verbatim zodOutputFormat output (SDK 1.12) for
+    // z.object({ e: z.array(z.object({ n: z.number().int().min(1) })).max(3) }).
+    const schema = {
+      $defs: {
+        __schema0: {
+          type: "object",
+          properties: { n: { type: "integer", description: "{minimum: 1}" } },
+          additionalProperties: false,
+          required: ["n"],
+        },
+      },
+      type: "object",
+      properties: {
+        e: {
+          type: "array",
+          items: { $ref: "#/$defs/__schema0" },
+          description: "{maxItems: 3}",
+        },
+      },
+      additionalProperties: false,
+      required: ["e"],
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect((out.properties as Record<string, unknown>).e).toEqual({
+      type: "array",
+      items: {
+        type: "object",
+        properties: { n: { type: "integer", description: "{minimum: 1}" } },
+        required: ["n"],
+      },
+      description: "{maxItems: 3}",
+    });
+  });
+
+  it("refuses a schema that refers back into itself", () => {
+    // Arrange: what z.lazy() makes of a tree.
+    const tree = {
+      $defs: {
+        node: {
+          type: "object",
+          properties: { kids: { type: "array", items: { $ref: "#/$defs/node" } } },
+        },
+      },
+      type: "object",
+      properties: { root: { $ref: "#/$defs/node" } },
+    };
+
+    // Act
+    const run = () => sanitizeJsonSchemaForGemini(tree);
+
+    // Assert
+    expect(run).toThrow(
+      "Gemini cannot take a recursive schema at schema.root.kids[]",
+    );
+  });
+
+  it("refuses the SDK's form of a z.record map", () => {
+    // Arrange: verbatim SDK 1.12 output for z.record(z.string(), z.number()).
+    const schema = {
+      type: "object",
+      properties: {
+        counts: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+          description: '{propertyNames: {"type":"string"}}',
+        },
+      },
+    };
+
+    // Act
+    const run = () => sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(run).toThrow("at schema.counts");
+  });
+
+  it("keeps a tool with no parameters", () => {
+    // Act
+    const out = sanitizeJsonSchemaForGemini({ type: "object", properties: {} });
+
+    // Assert
+    expect(out).toEqual({ type: "object", properties: {} });
+  });
+
   it("keeps an object with fixed keys that also allows extra ones", () => {
     // Arrange
     const schema = {

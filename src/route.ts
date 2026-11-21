@@ -3,10 +3,11 @@
  * tries each tier in order until one succeeds.
  *
  * Default policy (free first, paid as last-resort):
- *   - plain text chat or tools[] →  [groq, gemini, cerebras, mistral,
+ *   - plain text chat or tools[] →  [gemini, groq, cerebras, mistral,
  *                                     github-models, openrouter, workers-ai]
  *       (seven independent free-quota pools, fastest first; exhausting all
- *       on the same day is what makes the paid fallback rare)
+ *       on the same day is what makes the paid fallback rare. A private
+ *       caller gets [groq, cerebras, workers-ai].)
  *   - image content present  →  [gemini, openrouter, workers-ai]
  *                                                     (gemini is best free vision; OpenRouter
  *                                                      Llama 4 is next; Gemma 4 26B on Workers AI
@@ -200,8 +201,12 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   // Default for both plain chat and tool-using calls. Stacks SEVEN
   // independent free-quota pools, fastest first, so the slow pools are the
   // reserve rather than the first stop (replays of 2026-11-21):
-  //   groq           — about 3 s, native tool use; shared daily token cap
   //   gemini         — 1-7 s; per-Google-API-key quota (multi-key rotation)
+  //   groq           — about 3 s, native tool use. Its 200K tokens a day are
+  //                    shared by every app and were spent by morning on
+  //                    2026-11-21, and it is the one fast tier a private
+  //                    caller may use, so apps that may use gemini go there
+  //                    first and leave groq for the ones that can't.
   //   cerebras       — fast when it works; fails in under 1 s (402 today)
   //   mistral        — free experimental tier; fails in under 1 s (429 today)
   //   github-models  — Azure-backed, free with any GitHub account
@@ -210,8 +215,8 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   // The pools are the same as before, so when gemini's quota runs out the
   // chain lands where it used to; it is faster whenever gemini answers.
   return [
-    "groq",
     "gemini",
+    "groq",
     "cerebras",
     "mistral",
     "github-models",

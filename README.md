@@ -9,7 +9,7 @@ last-resort tier appended automatically when the worker has an
                 ┌──────────────────────────────────────────────────────────────────────────┐
 POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
                 ├──────────────────────────────────────────────────────────────────────────┤
-                │ default / tools[]     →  [groq, gemini, cerebras, mistral, github-models,│
+                │ default / tools[]     →  [gemini, groq, cerebras, mistral, github-models,│
                 │                           openrouter, workers-ai, *anthropic] fastest first│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
@@ -113,14 +113,14 @@ abort signal) when the limit runs out, and the chain moves to the next tier.
 
 | Limit | Default | Notes |
 |---|---|---|
-| Own limit, fast tiers (groq, cerebras, mistral, github-models, gemini) | 20 s | About 3x the slowest reply measured on 2026-11-21 (gemini, 6.8 s for an 8K-token curriculum). Override with `TIER_TIME_LIMIT_MS_<TIER>`, e.g. `TIER_TIME_LIMIT_MS_GEMINI`. A tier that runs out its own limit is skipped for 60 s. |
+| Own limit, fast tiers (groq, cerebras, mistral, github-models, gemini) | 20 s + 5 ms per `max_tokens` | Gemini's slowest reply on 2026-11-21 was 6.8 s for a 3.5K-token curriculum, about 600 tokens a second; 5 ms a token is a third of that, so a long reply is never cut for being long. Override with `TIER_TIME_LIMIT_MS_<TIER>`, e.g. `TIER_TIME_LIMIT_MS_GEMINI`. A timeout never shuts the tier for other requests. |
 | Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s and 64 s; only the chain budget bounds them. |
 | Chain budget, all free tiers together | 80 s | `CHAIN_TIME_LIMIT_MS`. Cut to the caller's own timeout less 2 s when the SDK sends `X-Stainless-Timeout`, so the caller gets an answer before it gives up. Tiers left when it is spent are not tried. |
 | Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
 
 For a stream the limit covers the wait for the response to start; once it
-has started it is never cut. A prompt over 100K tokens gets no own tier limit (the 20 s
-was measured on prompts under 10K tokens); only the chain budget bounds it.
+has started it is never cut. A prompt over 100K tokens gets no own tier limit (the speeds
+were measured on prompts under 10K tokens); only the chain budget bounds it.
 
 ## Private callers
 
@@ -131,8 +131,10 @@ mistral and github-models. Those tiers are left out of every chain for them
 (text, tools, images, long context), and a private request pinned to one of
 them gets a 400. Knox sends people's health insurance letters. Claiming a
 name only makes the claimant's own routing more private, so the header needs
-no proof here. The cost: while groq is out, a private caller's free chain is
-groq, cerebras and workers-ai, so its replies are as slow as Workers AI.
+no proof here. A private caller's free chain is groq, cerebras and
+workers-ai; the other apps go to gemini before groq, which leaves groq's
+shared daily tokens for the callers that can't use gemini. While groq is
+out, a private caller's replies are as slow as Workers AI.
 
 ## Response cache
 

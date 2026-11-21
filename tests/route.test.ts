@@ -12,8 +12,8 @@ const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMe
 // The default free chain stacks every independent free-quota pool. Centralized
 // here so future additions update one place.
 const DEFAULT_FREE_CHAIN = [
-  "groq",
   "gemini",
+  "groq",
   "cerebras",
   "mistral",
   "github-models",
@@ -77,10 +77,10 @@ describe("decideRoute", () => {
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes tools[]-bearing requests through the same multi-provider chain (groq first)", () => {
+  it("routes tools[]-bearing requests through the same multi-provider chain (gemini first)", () => {
     const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
     expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
-    expect(d.tiers[0]).toBe("groq");
+    expect(d.tiers[0]).toBe("gemini");
     expect(d.tiers).not.toContain("anthropic");
     expect(d.reason).toMatch(/tools=1/);
   });

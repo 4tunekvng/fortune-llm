@@ -70,7 +70,6 @@ import {
   paidHasTime,
   tierLimitMs,
   TierTimeoutError,
-  TIMEOUT_TRIP_MS,
   withTimeLimit,
 } from "./time-limit.js";
 import type { DailyStats, StatsEvent } from "./stats-do.js";
@@ -698,13 +697,16 @@ function invokeTimed(
   if (tier === "anthropic") return invokeTier(tier, env, parsed, request, rawBody);
   const own = longContext
     ? undefined
-    : tierLimitMs(tier, env as unknown as Record<string, unknown>);
-  const ownLimit = own !== undefined && own <= left;
-  const ms = ownLimit ? own : left;
+    : tierLimitMs(
+        tier,
+        env as unknown as Record<string, unknown>,
+        parsed.max_tokens,
+      );
+  const ms = own !== undefined && own < left ? own : left;
   return withTimeLimit(
     (signal) => invokeTier(tier, env, parsed, request, rawBody, signal),
     ms,
-    () => new TierTimeoutError(tier, ms, ownLimit),
+    () => new TierTimeoutError(tier, ms),
   );
 }
 
@@ -814,15 +816,8 @@ async function tripOnQuota(
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
-  // A tier that ran out its own limit (about 3x the slowest reply measured)
-  // is hanging, so skip it briefly; a call the chain budget cut short says
-  // nothing about the tier.
-  const ms =
-    err instanceof TierTimeoutError
-      ? err.ownLimit
-        ? TIMEOUT_TRIP_MS
-        : 0
-      : tripMsFor(err, tripDurationMs);
+  // A timeout belongs to this one request (time-limit.ts), never the tier.
+  const ms = err instanceof TierTimeoutError ? 0 : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
