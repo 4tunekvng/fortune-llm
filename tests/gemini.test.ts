@@ -280,6 +280,87 @@ describe("sanitizeJsonSchemaForGemini", () => {
   });
 });
 
+describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
+  it("offers each type of a several-type list as an alternative", () => {
+    // Arrange
+    const schema = {
+      type: "object",
+      properties: { v: { type: ["string", "number", "null"] } },
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out.properties).toEqual({
+      v: { nullable: true, anyOf: [{ type: "string" }, { type: "number" }] },
+    });
+  });
+
+  it("refuses a free-form map in a tool and names the field", () => {
+    // Arrange: DSM's plan tool shape from issue #27.
+    const tools = [
+      {
+        name: "plan",
+        input_schema: {
+          type: "object",
+          properties: {
+            filters: {
+              type: "object",
+              additionalProperties: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+      },
+    ];
+
+    // Act
+    const translate = () => translateToolsToGemini(tools);
+
+    // Assert
+    expect(translate).toThrow(
+      "Gemini cannot take a free-form map (an object with no fixed keys) " +
+        "at tools.plan.filters",
+    );
+  });
+
+  it("refuses a request whose output schema holds a map, before any call", () => {
+    // Arrange
+    const req = baseReq({
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { counts: { type: "object", additionalProperties: true } },
+          },
+        },
+      },
+    } as Partial<AnthropicMessagesRequest>);
+
+    // Act
+    const build = () => buildGeminiInput(req);
+
+    // Assert
+    expect(build).toThrow("at schema.counts");
+  });
+
+  it("keeps an object with fixed keys that also allows extra ones", () => {
+    // Arrange
+    const schema = {
+      type: "object",
+      properties: { a: { type: "string" } },
+      additionalProperties: true,
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out).toEqual({ type: "object", properties: { a: { type: "string" } } });
+  });
+});
+
 describe("translateToolsToGemini", () => {
   it("returns the function declarations with sanitized parameters", () => {
     const out = translateToolsToGemini([
