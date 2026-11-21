@@ -82,7 +82,9 @@ export function getRateLimitScope(
   dev: boolean,
 ): { scope: string; kind: "consumer" | "ip" } {
   const raw = request.headers.get("x-fortune-consumer");
-  if (!dev && raw && CONSUMER_RE.test(raw) && envBag[consumerLimitVar(raw)] !== undefined) {
+  const registered =
+    raw !== null && CONSUMER_RE.test(raw) && envBag[consumerLimitVar(raw)] !== undefined;
+  if (!dev && raw && registered) {
     return { scope: raw.toLowerCase(), kind: "consumer" };
   }
   return { scope: getClientIp(request), kind: "ip" };
@@ -105,7 +107,8 @@ export function resolveConsumerRateLimit(
   envBag: Record<string, string | undefined>,
 ): number {
   if (!CONSUMER_RE.test(consumer)) return globalDefault;
-  return resolveRateLimitPerMin(envBag[consumerLimitVar(consumer)] ?? String(globalDefault));
+  const override = envBag[consumerLimitVar(consumer)];
+  return resolveRateLimitPerMin(override ?? String(globalDefault));
 }
 
 /**

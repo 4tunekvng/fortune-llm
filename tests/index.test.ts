@@ -483,7 +483,7 @@ describe("fetch handler routing before the chain", () => {
     );
   });
 
-  it("labels the development token's stats apart from the app it names", async () => {
+  it("labels development-token stats apart from the app they name", async () => {
     // Arrange
     const recordEvents = vi.fn(async () => {});
     const statsEnv = {
@@ -508,7 +508,7 @@ describe("fetch handler routing before the chain", () => {
     expect(recordEvents).toHaveBeenCalledWith(expect.anything(), "dev-knox");
   });
 
-  it("rate-limits the development token by IP even when it names an app", async () => {
+  it("rate-limits the development token by IP when it names an app", async () => {
     // Arrange: knox is registered with room to spare; the IP bucket is full.
     const store = new Map<string, string>([
       [`rate:5.6.7.8:${Math.floor(Date.now() / 60_000)}`, "1"],
