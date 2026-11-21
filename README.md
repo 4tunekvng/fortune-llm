@@ -250,6 +250,23 @@ npx wrangler kv namespace create CIRCUIT --preview
 # paste the printed ids into wrangler.toml
 ```
 
+## Latency replay
+
+`npm run replay` sends one request shaped like each app's (a Leggo chat
+turn, a Maestro curriculum, a Thesis letter read with a schema, a Tellar room
+question) to the live gateway and prints p50, p95 and success per app and per
+tier. Prompts are synthetic text of each app's size; tools, schemas,
+`max_tokens` and metadata copy what each app sends. Needs `GATEWAY_TOKEN` in
+the environment. Every run spends real free-tier quota.
+
+```
+GATEWAY_TOKEN=... npm run replay -- --mode chain --runs 10
+GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
+```
+
+`chain` replays each app the way it calls today, held to free tiers;
+`pinned` pins each app to each tier to size the per-tier time limits.
+
 ## Limitations
 
 - Workers AI does not support vision; vision requests go to Gemini.
