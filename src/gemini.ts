@@ -569,10 +569,7 @@ export async function callGeminiModels(
     try {
       return { resp: await callGeminiWithRotation(keys, model, req, isKeyError), model };
     } catch (err) {
-      // 404: Google retired the model on this key. 503: the model is "currently
-      // experiencing high demand" (live 2026-11-21); another model may not be.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!isKeyError(err) && !/Gemini (404|503)/.test(msg)) throw err;
+      if (!isKeyError(err) && !/Gemini 404/.test(err instanceof Error ? err.message : String(err))) throw err;
       lastError = err;
       if (isKeyError(err)) lastQuotaError = err;
     }
