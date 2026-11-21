@@ -233,4 +233,60 @@ describe("fetch handler with a slow tier", () => {
     expect(resp.status).toBe(503);
     expect((await getCircuitState("groq", kv as never)).open).toBe(false);
   });
+
+  it("does not start paid Anthropic when the caller is about to leave", async () => {
+    // Arrange: the caller waits 20 s; every free tier hangs.
+    vi.useFakeTimers();
+    const kv = new MapKv();
+    const fetchMock = hangingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = makeEnv(kv, {
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      AI: { run: hangingAi },
+    });
+
+    // Act
+    const pending = worker.fetch(
+      messagesRequest({}, { "x-stainless-timeout": "20" }),
+      env as never,
+      ctx as never,
+    );
+    await vi.advanceTimersByTimeAsync(18_001);
+    const resp = await pending;
+    vi.useRealTimers();
+
+    // Assert
+    expect(resp.status).toBe(503);
+    const paidCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("https://api.anthropic.com"),
+    );
+    expect(paidCalls).toHaveLength(0);
+  });
+
+  it("gives a long-context request no fast-tier limit", async () => {
+    // Arrange: a 110K-token prompt; Gemini hangs; its own limit is tiny.
+    const kv = new MapKv();
+    vi.stubGlobal("fetch", hangingFetch());
+    const env = makeEnv(kv, {
+      GEMINI_API_KEY: "gemini-key",
+      TIER_TIME_LIMIT_MS_GEMINI: "20",
+      CHAIN_TIME_LIMIT_MS: "100",
+      AI: { run: hangingAi },
+    });
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "x".repeat(440_000) }],
+      }),
+    });
+
+    // Act
+    await worker.fetch(req, env as never, ctx as never);
+
+    // Assert: the budget cut it, not its own limit, so it is not shut.
+    expect((await getCircuitState("gemini", kv as never)).open).toBe(false);
+  });
 });

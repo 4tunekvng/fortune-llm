@@ -14,7 +14,12 @@
  *     the caller's own timeout less 2 s when the SDK sends it in
  *     `X-Stainless-Timeout`, so the caller gets an answer before it hangs up.
  *
- * Paid Anthropic gets neither: it is the last resort and runs as before.
+ * Paid Anthropic gets neither: it is the last resort and runs as before,
+ * except that it is not started when the caller has told us it will hang
+ * up within PAID_MIN_LEFT_MS: the reply would be billed and thrown away.
+ *
+ * A long-context request (over route.ts's 100K-token mark) has no own
+ * tier limit either: the 20 s was measured on prompts under 10K tokens.
  */
 
 import type { BackendKind } from "./route.js";
@@ -34,6 +39,12 @@ const CLIENT_MARGIN_MS = 2_000;
 const MIN_BUDGET_MS = 5_000;
 /** How long a tier that ran out its own limit stays skipped. */
 export const TIMEOUT_TRIP_MS = 60_000;
+/**
+ * Paid Anthropic is not started with less than this left before the
+ * caller's own timeout: a Claude reply of a few thousand tokens takes
+ * 15 s or more, so it would be billed after the caller gave up.
+ */
+const PAID_MIN_LEFT_MS = 15_000;
 
 function positiveMs(raw: string | undefined | null): number | undefined {
   if (raw === undefined || raw === null || raw.trim() === "") return undefined;
@@ -56,6 +67,20 @@ export function chainBudgetMs(
   if (clientSeconds === undefined) return base;
   const client = clientSeconds * 1000 - CLIENT_MARGIN_MS;
   return Math.min(base, Math.max(MIN_BUDGET_MS, client));
+}
+
+/** When the caller will hang up, from the SDK's timeout header, if it said. */
+export function callerDeadline(
+  stainlessTimeout: string | null,
+  startedAt: number,
+): number | undefined {
+  const seconds = positiveMs(stainlessTimeout);
+  return seconds === undefined ? undefined : startedAt + seconds * 1000;
+}
+
+/** Whether there is still time for a paid reply to reach the caller. */
+export function paidHasTime(deadline: number | undefined, now: number): boolean {
+  return deadline === undefined || deadline - now >= PAID_MIN_LEFT_MS;
 }
 
 /** A tier's own limit, or undefined when only the chain budget bounds it. */

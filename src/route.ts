@@ -77,7 +77,7 @@ export interface DecideRouteOptions {
   anthropicFallback?: boolean;
 }
 
-const LONG_CONTEXT_THRESHOLD = 100_000;
+export const LONG_CONTEXT_THRESHOLD = 100_000;
 
 export function decideRoute(
   req: AnthropicMessagesRequest,

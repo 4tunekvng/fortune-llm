@@ -17,7 +17,13 @@ import type {
   AnthropicMessagesRequest,
 } from "./types.js";
 import { authenticate } from "./auth.js";
-import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
+import {
+  decideRoute,
+  estimateInputTokens,
+  LONG_CONTEXT_THRESHOLD,
+  type BackendKind,
+  type RouteChain,
+} from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import {
@@ -56,7 +62,9 @@ import {
 import { synthesizeAnthropicSSE } from "./sse.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
 import {
+  callerDeadline,
   chainBudgetMs,
+  paidHasTime,
   tierLimitMs,
   TierTimeoutError,
   TIMEOUT_TRIP_MS,
@@ -559,8 +567,10 @@ async function runChain(
   const errors: Array<{ tier: BackendKind; error: string }> = [];
   const skipped: Array<{ tier: BackendKind; until: number }> = [];
   const clientTimeout = request.headers.get("x-stainless-timeout");
-  const deadline =
-    Date.now() + chainBudgetMs(env.CHAIN_TIME_LIMIT_MS, clientTimeout);
+  const startedAt = Date.now();
+  const deadline = startedAt + chainBudgetMs(env.CHAIN_TIME_LIMIT_MS, clientTimeout);
+  const callerLeaves = callerDeadline(clientTimeout, startedAt);
+  const longContext = estimateInputTokens(effectiveParsed) > LONG_CONTEXT_THRESHOLD;
 
   for (let i = 0; i < chain.tiers.length; i++) {
     const tier = chain.tiers[i];
@@ -582,11 +592,16 @@ async function runChain(
       errors.push({ tier, error: `${tier} not tried: time budget spent` });
       continue;
     }
+    if (tier === "anthropic" && !paidHasTime(callerLeaves, Date.now())) {
+      errors.push({ tier, error: "anthropic not tried: caller about to give up" });
+      continue;
+    }
 
     try {
       const resp = await invokeTimed(
         tier,
         left,
+        longContext,
         env,
         effectiveParsed,
         request,
@@ -653,13 +668,16 @@ async function runChain(
 function invokeTimed(
   tier: BackendKind,
   left: number,
+  longContext: boolean,
   env: Env,
   parsed: AnthropicMessagesRequest,
   request: Request,
   rawBody: string,
 ): Promise<Response> {
   if (tier === "anthropic") return invokeTier(tier, env, parsed, request, rawBody);
-  const own = tierLimitMs(tier, env as unknown as Record<string, unknown>);
+  const own = longContext
+    ? undefined
+    : tierLimitMs(tier, env as unknown as Record<string, unknown>);
   const ownLimit = own !== undefined && own <= left;
   const ms = ownLimit ? own : left;
   return withTimeLimit(
