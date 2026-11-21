@@ -248,6 +248,36 @@ describe("sanitizeJsonSchemaForGemini", () => {
     expect(props.bytes).toEqual({ type: "integer", minimum: 0, maximum: 1_000_000 });
     expect(props.files).toEqual({ type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 });
   });
+
+  it("turns the SDK's enum, const and nullable output into Gemini's form", () => {
+    // Arrange: verbatim zodOutputFormat output from @anthropic-ai/sdk 1.10.0 for
+    // z.object({ kind: z.enum(["a","b"]), tag: z.literal("x"),
+    //            n: z.number().nullable() }).
+    const schema = {
+      type: "object",
+      properties: {
+        kind: { enum: ["a", "b"] },
+        tag: { const: "x" },
+        n: { type: ["number", "null"] },
+      },
+      additionalProperties: false,
+      required: ["kind", "tag", "n"],
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out).toEqual({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["a", "b"] },
+        tag: { type: "string", enum: ["x"] },
+        n: { type: "number", nullable: true },
+      },
+      required: ["kind", "tag", "n"],
+    });
+  });
 });
 
 describe("translateToolsToGemini", () => {
