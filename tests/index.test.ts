@@ -52,7 +52,7 @@ describe("fetch handler fallback chain", () => {
     expect(resp.status).toBe(200);
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     const priorErrors = resp.headers.get("x-fortune-llm-prior-errors");
-    expect(priorErrors).toMatch(/^groq:Groq 500 \| /);
+    expect(priorErrors).toMatch(/^gemini:[^|]+\| groq:Groq 500 \| /);
     expect(priorErrors).not.toContain("org_secret123");
   });
 });
@@ -86,7 +86,7 @@ describe("fetch handler with an empty reply", () => {
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
-      /^groq:groq returned an empty reply/,
+      /^gemini:GEMINI_API_KEY not configured \| groq:groq returned an empty reply/,
     );
     expect(await resp.json()).toMatchObject({
       content: [{ type: "text", text: "hello from workers ai" }],
@@ -147,7 +147,7 @@ describe("fetch handler with a structured request", () => {
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
-      /^groq:groq reply off schema \| /,
+      /^gemini:GEMINI_API_KEY not configured \| groq:groq reply off schema \| /,
     );
     expect(console.error).toHaveBeenCalledWith(
       "fortune-llm: tier groq failed:",
@@ -321,7 +321,9 @@ describe("fetch handler with a structured request", () => {
 
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
-    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBeNull();
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBe(
+      "gemini:GEMINI_API_KEY not configured",
+    );
   });
 });
 
