@@ -22,7 +22,8 @@
     "test": "vitest run",
     "test:integration:sdk": "node tests-integration/sdk-e2e.mjs",
     "test:integration:curl": "bash tests-integration/curl-matrix.sh",
-    "test:integration": "npm run test:integration:sdk && npm run test:integration:curl"
+    "test:integration": "npm run test:integration:sdk && npm run test:integration:curl",
+    "replay": "node tests-integration/replay-latency.mjs"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^1.12.0",
