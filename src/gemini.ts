@@ -303,7 +303,9 @@ function rejectNonTextChoices(node: Record<string, unknown>, path: string): void
     ...(Array.isArray(node.enum) ? node.enum : []),
   ];
   if (choices.some((c) => typeof c !== "string")) {
-    throw new RequestShapeError(`Gemini cannot take a non-text enum or const at ${path}`);
+    throw new RequestShapeError(
+      `Gemini cannot take a non-text enum or const at ${path}`,
+    );
   }
 }
 
