@@ -28,6 +28,7 @@ const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
 export interface CallCerebrasOptions {
   apiKey: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 export async function callCerebras(
@@ -40,6 +41,7 @@ export async function callCerebras(
       url: CEREBRAS_URL,
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
     },
     req,
   );

@@ -104,6 +104,22 @@ by `max_tokens`, counts as that tier failing and the chain moves on, so the
 caller never waits for a reply its own parser will throw away. Length and
 range limits are not checked: the SDK sends those as description hints and
 re-checks them itself.
+## Time limits
+
+A free tier that hangs can't hold a request: each free tier call runs under
+a time limit and is cancelled (its `fetch`, or Workers AI's `AI.run`, gets an
+abort signal) when the limit runs out, and the chain moves to the next tier.
+
+| Limit | Default | Notes |
+|---|---|---|
+| Own limit, fast tiers (groq, cerebras, mistral, github-models, gemini) | 10 s + 5 ms per `max_tokens` | On 2026-11-21 gemini's short replies took about 1 s and its slowest, a 3.5K-token curriculum, 6.8 s (about 600 tokens a second). 10 s is ten times the short replies and 5 ms a token a third of the measured speed, so a long reply is never cut for being long while a hung call gives way. Override with `TIER_TIME_LIMIT_MS_<TIER>`, e.g. `TIER_TIME_LIMIT_MS_GEMINI`. A timeout never shuts the tier for other requests. |
+| Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s and 64 s; only the chain budget bounds them. |
+| Chain budget, all free tiers together | the caller's timeout less 2 s, else 80 s | The SDK sends each call's timeout in `X-Stainless-Timeout`; the budget ends 2 s before it, so the caller gets an answer before it gives up, and a caller that chose to wait longer (Maestro's 100 s plan call) is not cut short. Without the header, `CHAIN_TIME_LIMIT_MS` (default 80 s). Tiers left when it is spent are not tried. |
+| Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
+
+For a stream the limit covers the wait for the response to start; once it
+has started it is never cut. A prompt over 100K tokens gets no own tier limit (the speeds
+were measured on prompts under 10K tokens); only the chain budget bounds it.
 
 ## Response cache
 
