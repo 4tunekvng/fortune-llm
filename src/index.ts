@@ -614,7 +614,9 @@ async function runChain(
         request,
         rawBody,
       );
-      if (tier !== "anthropic") {
+      if (tier === "anthropic") {
+        await rejectCappedPaid(resp);
+      } else {
         await rejectEmptyReply(tier, resp);
         await rejectOffSchemaReply(tier, resp, effectiveParsed);
       }
@@ -811,9 +813,40 @@ async function tripOnQuota(
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
-// Builds the final 503 response after all chain tiers are exhausted.
-// Distinguishes pure quota (all skipped, no errors), mixed (some skipped
-// + some errored), and all-errored cases.
+/**
+ * Paid Anthropic answers 400 invalid_request_error "You have reached your
+ * specified API usage limits. You will regain access on 2026-12-01 at 00:00
+ * UTC." when its spend cap is hit. Passed on, apps read that as their own
+ * bad request; as a failed tier it ends in the gateway's typed busy answer.
+ */
+async function rejectCappedPaid(resp: Response): Promise<void> {
+  if (resp.status !== 400) return;
+  let message = "";
+  try {
+    const body = (await resp.clone().json()) as { error?: { message?: string } };
+    message = body.error?.message ?? "";
+  } catch {
+    return;
+  }
+  if (!/usage limits?/i.test(message)) return;
+  const until = /regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC/i.exec(
+    message,
+  );
+  const when = until ? `${until[1]}T${until[2]}:00Z` : "unknown";
+  throw new Error(`Anthropic 400 capped until ${when}`);
+}
+
+/** Shown to people by apps: plain, and true whatever the tiers say. */
+const BUSY_MESSAGE =
+  "Every free model is busy or out right now. Try again in a few minutes.";
+/** Shortest wait suggested in retry-after, in seconds. */
+const MIN_RETRY_AFTER_S = 60;
+
+// Builds the final 503 response after all chain tiers are exhausted. The
+// error types stay as before (local-routines match them, and read the
+// "open until <ISO>" times in `detail`); the message is plain, retry-after
+// says when the first tier reopens, and x-should-retry stops the SDKs
+// retrying a chain that just failed end to end.
 function chainExhaustedResponse(
   errors: Array<{ tier: BackendKind; error: string }>,
   skipped: Array<{ tier: BackendKind; until: number }>,
@@ -821,66 +854,45 @@ function chainExhaustedResponse(
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Response {
-  const headers: HeadersInit = {
+  statsEvents.push({ kind: "error" });
+  flushStats();
+  const soonest = Math.min(...skipped.map((s) => s.until));
+  const retryAfterS = Number.isFinite(soonest)
+    ? Math.max(MIN_RETRY_AFTER_S, Math.ceil((soonest - Date.now()) / 1000))
+    : MIN_RETRY_AFTER_S;
+  const headers: Record<string, string> = {
     "content-type": "application/json",
     "access-control-allow-origin": "*",
     "access-control-expose-headers": EXPOSE_HEADERS,
+    "retry-after": String(retryAfterS),
+    "x-should-retry": "false",
   };
   if (skipped.length > 0) {
-    (headers as Record<string, string>)["x-fortune-llm-skipped"] =
-      formatSkippedHeader(skipped);
+    headers["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
   }
-  statsEvents.push({ kind: "error" });
-  flushStats();
-
-  if (skipped.length > 0 && errors.length === 0) {
-    // Every tier in the chain had its circuit open — pure quota state.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${skipped
-            .map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            )
-            .join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  if (skipped.length > 0) {
-    // Mixed: some tiers skipped (quota), some failed (other reasons).
-    // Still a 503 quota_exhausted because the dominant signal is that
-    // the backends are throttled — but include the failed-tier errors
-    // so debugging is possible.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${[
-            ...skipped.map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            ),
-            ...errors.map((e) => `${e.tier} (failed)`),
-          ].join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  return jsonError(
-    503,
-    "all_backends_failed",
-    `All free backends in chain [${chain.tiers.join(",")}] failed: ${errors
-      .map((e) => e.tier)
-      .join(", ")}.`,
+  const capped = errors
+    .map((e) => /capped until (\S+)/.exec(e.error)?.[1])
+    .find((d) => d !== undefined);
+  const detail = [
+    ...skipped.map(
+      (s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`,
+    ),
+    ...errors.map((e) => `${e.tier} (${errorLabel(e.error)})`),
+  ].join(", ");
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: skipped.length > 0 ? "quota_exhausted" : "all_backends_failed",
+        message: BUSY_MESSAGE,
+        detail:
+          `all backends unavailable in chain [${chain.tiers.join(",")}]: ` +
+          detail,
+        retry_after_s: retryAfterS,
+        ...(capped ? { paid_capped_until: capped } : {}),
+      },
+    }),
+    { status: 503, headers },
   );
 }
 
@@ -1354,9 +1366,14 @@ function formatPriorErrorsHeader(
   errors: Array<{ tier: BackendKind; error: string }>,
 ): string {
   return errors
-    .map((e) => `${e.tier}:${(e.error.split(":")[0] ?? "").slice(0, 80)}`)
+    .map((e) => `${e.tier}:${errorLabel(e.error)}`)
     .join(" | ")
     .replace(/[\x00-\x1f\x7f]+/g, " ");
+}
+
+/** The leading `<Label> <status>` part of a tier error, never the raw body. */
+function errorLabel(error: string): string {
+  return (error.split(":")[0] ?? "").slice(0, 80);
 }
 
 function formatSkippedHeader(

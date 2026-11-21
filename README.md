@@ -167,6 +167,30 @@ every other consumer.
 | Response on cap | `429 {"type":"rate_limit_error","message":…}` with `Retry-After` header | Standard back-off semantics. |
 | Failure mode | Fails open on KV unavailability | Better to miss a limit than block all traffic on infra trouble. |
 
+## When every tier fails
+
+The answer is `503` with a body apps can show as is:
+
+```json
+{"type":"error","error":{
+  "type":"quota_exhausted",
+  "message":"Every free model is busy or out right now. Try again in a few minutes.",
+  "detail":"all backends unavailable in chain [groq,gemini,...]: groq (open until 2026-11-21T21:18:35.341Z), gemini (Gemini 503), ...",
+  "retry_after_s":600,
+  "paid_capped_until":"2026-12-01T00:00:00Z"}}
+```
+
+- `type` is `quota_exhausted` when at least one tier's circuit was open,
+  else `all_backends_failed` (unchanged; local-routines match both).
+- `retry-after` and `retry_after_s`: seconds until the soonest open circuit
+  closes, at least 60.
+- `x-should-retry: false` stops the Anthropic SDKs from retrying at once a
+  chain that just failed end to end (they retry any 5xx twice by default).
+- `paid_capped_until` appears when paid Anthropic answered that its spend
+  cap is reached; that 400 is a failed tier, not passed through as the
+  caller's own bad request. Any other paid 400 is still passed through.
+- `detail` names each tier with only its leading `<Label> <status>`.
+
 ## Endpoints
 
 | Method | Path | Behavior |
@@ -239,7 +263,7 @@ that tier entirely.
 | Default open duration | 1 hour. Override via `[vars] CIRCUIT_TRIP_DURATION_MS = "1800000"` (30 min). Capped at 24h. |
 | Anthropic tier | Never circuit-gated — it's explicitly opt-in and paid, the user asked for it. |
 | KV unbound | Breaker no-ops with a one-time warning; behavior reverts to the old retry-every-time chain. |
-| Response when all tiers skipped | `503` with `{"type":"error","error":{"type":"quota_exhausted","message":"all backends unavailable: workers-ai (open until <ISO>), gemini (open until <ISO>)"}}` |
+| Response when all tiers skipped | `503` `quota_exhausted`, the busy answer below |
 | Diagnostic header | `x-fortune-llm-skipped: workers-ai:<ISO>,gemini:<ISO>` on every response where a tier was skipped |
 
 One-time setup (also shown in [Deploy](#deploy) above):
