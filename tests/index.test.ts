@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 
 import worker from "../src/index.js";
@@ -91,6 +91,126 @@ describe("fetch handler with an empty reply", () => {
     expect(await resp.json()).toMatchObject({
       content: [{ type: "text", text: "hello from workers ai" }],
     });
+  });
+});
+
+describe("fetch handler with a structured request", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const schema = {
+    type: "object",
+    properties: { docType: { enum: ["eob", "denial"] } },
+    required: ["docType"],
+    additionalProperties: false,
+  };
+
+  function structuredRequest(): Request {
+    return new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "read this letter" }],
+        output_config: { format: { type: "json_schema", schema } },
+      }),
+    });
+  }
+
+  it("moves past a tier whose reply misses the schema", async () => {
+    // Arrange: Groq answers an enum value outside the list (issue #28),
+    // Workers AI answers in the schema.
+    const offSchema = {
+      id: "chatcmpl-1",
+      choices: [
+        { message: { role: "assistant", content: '{"docType":"Denial Letter"}' } },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(offSchema)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: '{"docType":"denial"}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
+      /^groq:groq reply off schema \| /,
+    );
+    expect(console.error).toHaveBeenCalledWith(
+      "fortune-llm: tier groq failed:",
+      "groq reply off schema: $.docType is not one of the allowed values " +
+        "(stop_reason end_turn)",
+    );
+    expect(await resp.json()).toMatchObject({
+      content: [{ type: "text", text: '{"docType":"denial"}' }],
+    });
+  });
+
+  it("moves past a tier whose reply is cut off mid-JSON", async () => {
+    // Arrange: Groq hits max_tokens inside the object.
+    const cut = {
+      id: "chatcmpl-2",
+      choices: [
+        {
+          message: { role: "assistant", content: '{"docType":"den' },
+          finish_reason: "length",
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(cut)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: '{"docType":"eob"}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(console.error).toHaveBeenCalledWith(
+      "fortune-llm: tier groq failed:",
+      "groq reply off schema: it is not JSON (stop_reason max_tokens)",
+    );
+  });
+
+  it("keeps the first tier when its reply matches", async () => {
+    // Arrange
+    const inSchema = {
+      id: "chatcmpl-3",
+      choices: [{ message: { role: "assistant", content: '{"docType":"eob"}' } }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(inSchema)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBeNull();
   });
 });
 
