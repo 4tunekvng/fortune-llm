@@ -17,8 +17,10 @@
  * as closed (`additionalProperties: false`, which is also how it writes a
  * `z.record` map) and every field as required, with the default moved into
  * the description as `{default: ...}`. So extra keys are allowed, and a
- * field with a default may be missing. Length and range limits are not
- * checked either: the SDK moves those into `description` as hints.
+ * field with a default may be missing. Length, count and range limits are
+ * checked where zod checks them: the SDK moves them out of the schema into a
+ * trailing `{minLength: 3, maxLength: 120}` in the description, and reads
+ * them back when it parses, so a reply that misses one fails there too.
  */
 
 type Schema = boolean | Record<string, unknown>;
@@ -59,6 +61,7 @@ function check(
   return (
     checkType(value, schema.type, path) ??
     checkEnum(value, schema, path) ??
+    checkLimits(value, schema, path) ??
     checkCombinators(value, schema, root, path, depth) ??
     checkObject(value, schema, root, path, depth) ??
     checkArray(value, schema, root, path, depth)
@@ -103,6 +106,60 @@ function checkEnum(
   if (Array.isArray(options) && !options.some((o) => sameJson(value, o))) {
     return `${path} is not one of the allowed values`;
   }
+  return null;
+}
+
+const LIMIT_KEYS = [
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+] as const;
+type Limits = Partial<Record<(typeof LIMIT_KEYS)[number], number>>;
+
+/** Limits set as keywords, or as the SDK's trailing `{key: n, ...}` hint. */
+function limitsOf(schema: Record<string, unknown>): Limits {
+  const out: Limits = {};
+  const hint = typeof schema.description === "string"
+    ? /\{([^{}]*)\}\s*$/.exec(schema.description)?.[1] ?? ""
+    : "";
+  for (const [, key, n] of hint.matchAll(/(\w+):\s*(-?[\d.]+(?:e[+-]?\d+)?)/g)) {
+    if ((LIMIT_KEYS as readonly string[]).includes(key as string)) {
+      out[key as keyof Limits] = Number(n);
+    }
+  }
+  for (const key of LIMIT_KEYS) {
+    if (typeof schema[key] === "number") out[key] = schema[key] as number;
+  }
+  return out;
+}
+
+function checkLimits(
+  value: unknown,
+  schema: Record<string, unknown>,
+  path: string,
+): string | null {
+  const l = limitsOf(schema);
+  if (typeof value === "number") {
+    const low =
+      (l.minimum !== undefined && value < l.minimum) ||
+      (l.exclusiveMinimum !== undefined && value <= l.exclusiveMinimum);
+    const high =
+      (l.maximum !== undefined && value > l.maximum) ||
+      (l.exclusiveMaximum !== undefined && value >= l.exclusiveMaximum);
+    if (low) return `${path} is below its minimum`;
+    if (high) return `${path} is above its maximum`;
+  }
+  const text = typeof value === "string";
+  if (!text && !Array.isArray(value)) return null;
+  const size = (value as string | unknown[]).length;
+  const [min, max] = text ? [l.minLength, l.maxLength] : [l.minItems, l.maxItems];
+  if (min !== undefined && size < min) return `${path} is shorter than ${min}`;
+  if (max !== undefined && size > max) return `${path} is longer than ${max}`;
   return null;
 }
 
