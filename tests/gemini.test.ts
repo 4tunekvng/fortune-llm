@@ -345,6 +345,23 @@ describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
     expect(build).toThrow("at schema.counts");
   });
 
+  it("refuses a number const or a number enum, before any call", () => {
+    // Arrange
+    const literal = { type: "object", properties: { v: { const: 1 } } };
+    const numbers = {
+      type: "object",
+      properties: { n: { type: "integer", enum: [1, 2, 3] } },
+    };
+
+    // Act
+    const one = () => sanitizeJsonSchemaForGemini(literal);
+    const many = () => sanitizeJsonSchemaForGemini(numbers);
+
+    // Assert
+    expect(one).toThrow("Gemini cannot take a non-text enum or const at schema.v");
+    expect(many).toThrow("at schema.n");
+  });
+
   it("keeps an object with fixed keys that also allows extra ones", () => {
     // Arrange
     const schema = {

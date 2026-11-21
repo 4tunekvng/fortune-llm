@@ -230,6 +230,7 @@ export function sanitizeJsonSchemaForGemini(
 function sanitizeSchemaNode(node: unknown, path: string): unknown {
   if (node === null || typeof node !== "object" || Array.isArray(node)) return node;
   rejectFreeFormMap(node as Record<string, unknown>, path);
+  rejectNonTextChoices(node as Record<string, unknown>, path);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
     if (!GEMINI_SCHEMA_ALLOWED_FIELDS.has(k)) continue;
@@ -287,6 +288,22 @@ function rejectFreeFormMap(node: Record<string, unknown>, path: string): void {
     throw new Error(
       `Gemini cannot take a free-form map (an object with no fixed keys) at ${path}`,
     );
+  }
+}
+
+/**
+ * Gemini's `enum` holds strings only and it has no `const`, so a number or
+ * boolean choice (`z.literal(1)`, `z.enum` over numbers) would reach it with
+ * no constraint and come back off the schema. Throwing before the call moves
+ * the chain on at no cost.
+ */
+function rejectNonTextChoices(node: Record<string, unknown>, path: string): void {
+  const choices = [
+    ...("const" in node ? [node.const] : []),
+    ...(Array.isArray(node.enum) ? node.enum : []),
+  ];
+  if (choices.some((c) => typeof c !== "string")) {
+    throw new Error(`Gemini cannot take a non-text enum or const at ${path}`);
   }
 }
 
