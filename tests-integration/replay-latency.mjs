@@ -450,11 +450,16 @@ async function callOnce(spec, route, deadline) {
       skipped: h("skipped"),
     };
     if (resp.status !== 200) {
-      let type = null;
+      let error = {};
       try {
-        type = JSON.parse(text)?.error?.type ?? null;
+        error = JSON.parse(text)?.error ?? {};
       } catch {}
-      return { ...base, ok: false, why: `HTTP ${resp.status} ${type ?? ""}` };
+      return {
+        ...base,
+        ok: false,
+        why: `HTTP ${resp.status} ${error.type ?? ""}`,
+        detail: error.detail ?? error.message ?? null,
+      };
     }
     const why = judge(spec, JSON.parse(text));
     return { ...base, ok: why === null, why };
