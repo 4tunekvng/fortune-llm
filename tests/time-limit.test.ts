@@ -94,18 +94,22 @@ describe("chainBudgetMs", () => {
 });
 
 describe("tierLimitMs", () => {
-  it("bounds the fast tiers and leaves the slow ones to the budget", () => {
+  it("bounds fast tiers by reply length, leaving slow ones to the budget", () => {
     // Act
     const limits = [
-      tierLimitMs("gemini", {}),
-      tierLimitMs("groq", {}),
-      tierLimitMs("openrouter", {}),
-      tierLimitMs("workers-ai", {}),
-      tierLimitMs("github-models", { TIER_TIME_LIMIT_MS_GITHUB_MODELS: "7000" }),
+      tierLimitMs("gemini", {}, 1024),
+      tierLimitMs("groq", {}, 8192),
+      tierLimitMs("openrouter", {}, 1024),
+      tierLimitMs("workers-ai", {}, 1024),
+      tierLimitMs(
+        "github-models",
+        { TIER_TIME_LIMIT_MS_GITHUB_MODELS: "7000" },
+        1024,
+      ),
     ];
 
     // Assert
-    expect(limits).toEqual([20_000, 20_000, undefined, undefined, 7_000]);
+    expect(limits).toEqual([25_120, 60_960, undefined, undefined, 7_000]);
   });
 });
 
@@ -131,7 +135,8 @@ describe("fetch handler with a slow tier", () => {
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.signal?.aborted).toBe(true);
-    expect((await getCircuitState("groq", kv as never)).open).toBe(true);
+    // One slow reply says nothing certain about the next, so groq stays on.
+    expect((await getCircuitState("groq", kv as never)).open).toBe(false);
   });
 
   it("does not shut a tier the chain budget cut short", async () => {
