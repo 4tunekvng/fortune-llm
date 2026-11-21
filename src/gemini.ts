@@ -26,7 +26,7 @@ import type {
   GeminiResponse,
 } from "./types.js";
 import { getOutputSchemaObject } from "./structured-output.js";
-import { UpstreamError } from "./upstream-error.js";
+import { RequestShapeError, UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
   parseSseDataLine,
@@ -285,7 +285,7 @@ function rejectFreeFormMap(node: Record<string, unknown>, path: string): void {
   const hasProps =
     typeof props === "object" && props !== null && Object.keys(props).length > 0;
   if (node.additionalProperties && !hasProps) {
-    throw new Error(
+    throw new RequestShapeError(
       `Gemini cannot take a free-form map (an object with no fixed keys) at ${path}`,
     );
   }
@@ -303,7 +303,7 @@ function rejectNonTextChoices(node: Record<string, unknown>, path: string): void
     ...(Array.isArray(node.enum) ? node.enum : []),
   ];
   if (choices.some((c) => typeof c !== "string")) {
-    throw new Error(`Gemini cannot take a non-text enum or const at ${path}`);
+    throw new RequestShapeError(`Gemini cannot take a non-text enum or const at ${path}`);
   }
 }
 

@@ -362,6 +362,31 @@ describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
     expect(many).toThrow("at schema.n");
   });
 
+  it("never reads a refused field's name as a quota error", () => {
+    // Arrange: a tool whose name holds a quota word.
+    const tools = [
+      {
+        name: "set_quota",
+        input_schema: {
+          type: "object",
+          properties: { limits: { type: "object", additionalProperties: true } },
+        },
+      },
+    ];
+
+    // Act
+    let thrown: unknown;
+    try {
+      translateToolsToGemini(tools);
+    } catch (err) {
+      thrown = err;
+    }
+
+    // Assert
+    expect(String(thrown)).toContain("tools.set_quota.limits");
+    expect(isQuotaError(thrown)).toBe(false);
+  });
+
   it("keeps an object with fixed keys that also allows extra ones", () => {
     // Arrange
     const schema = {
