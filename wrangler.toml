@@ -59,6 +59,8 @@ binding = "AI"
 #   CIRCUIT_TRIP_DURATION_MS = "1800000"   # circuit breaker trip duration, default 1h
 #   CACHE_TTL_SECONDS        = "86400"     # response cache TTL, default 24h, 0 disables
 #   RATE_LIMIT_PER_MIN       = "200"       # per-IP req/min, default 200, 0 disables
+#   CHAIN_TIME_LIMIT_MS      = "80000"     # all free tiers of one request together
+#   TIER_TIME_LIMIT_MS_GEMINI = "20000"    # one tier's own limit (README "Time limits")
 [[kv_namespaces]]
 binding = "CIRCUIT"
 id = "2ff745a8a79e47fd8a3728da8f81ce6d"
