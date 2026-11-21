@@ -6,11 +6,19 @@
  *
  * Covers the JSON Schema the SDK's `zodOutputFormat` sends: boolean schemas,
  * `type` (one or a list), `enum`, `const`, `properties`, `required`,
- * `additionalProperties`, `items`, `prefixItems`, `anyOf`, `oneOf` (checked
- * as anyOf), `allOf`, `nullable`, and local `$ref` into `$defs` or
- * `definitions`. Every other keyword is ignored, so a keyword this file does
- * not know can never fail a good reply. Length and range limits are not
- * checked: the SDK moves those into `description` as hints.
+ * `additionalProperties` given as a schema, `items`, `prefixItems`, `anyOf`,
+ * `oneOf` (checked as anyOf), `allOf`, `nullable`, and local `$ref` into
+ * `$defs` or `definitions`. Every other keyword is ignored, so a keyword
+ * this file does not know can never fail a good reply.
+ *
+ * The bar is what the app's own parser accepts, not the letter of the
+ * schema. Zod, behind the SDK's `messages.parse`, drops keys it doesn't know
+ * and fills in fields that have a default, while the SDK sends every object
+ * as closed (`additionalProperties: false`, which is also how it writes a
+ * `z.record` map) and every field as required, with the default moved into
+ * the description as `{default: ...}`. So extra keys are allowed, and a
+ * field with a default may be missing. Length and range limits are not
+ * checked either: the SDK moves those into `description` as hints.
  */
 
 type Schema = boolean | Record<string, unknown>;
@@ -138,16 +146,30 @@ function checkObject(
   const props = (schema.properties ?? {}) as Record<string, Schema>;
   const required = Array.isArray(schema.required) ? schema.required : [];
   for (const key of required) {
-    if (!(key in obj)) return `${path}.${String(key)} is missing`;
+    if (!(key in obj) && !hasDefault(props[String(key)])) {
+      return `${path}.${String(key)} is missing`;
+    }
   }
+  // `false` closes the object, but zod drops the extra keys rather than
+  // failing, so only a schema for extra values is checked.
+  const extra = schema.additionalProperties;
+  const extraSchema =
+    typeof extra === "object" && extra !== null ? (extra as Schema) : undefined;
   for (const [key, v] of Object.entries(obj)) {
-    const extra = schema.additionalProperties as Schema | undefined;
-    const sub = key in props ? props[key] : extra;
+    const sub = key in props ? props[key] : extraSchema;
     if (sub === undefined) continue;
     const miss = check(v, sub, root, `${path}.${key}`, depth + 1);
     if (miss) return miss;
   }
   return null;
+}
+
+/** A field zod fills in when the reply leaves it out. */
+function hasDefault(schema: Schema | undefined): boolean {
+  if (typeof schema !== "object" || schema === null) return false;
+  if ("default" in schema) return true;
+  const hint = schema.description;
+  return typeof hint === "string" && hint.includes("{default:");
 }
 
 function checkArray(

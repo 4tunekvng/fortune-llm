@@ -56,15 +56,45 @@ describe("schemaMismatch on the SDK's output", () => {
     expect(miss).toBe("$.facts is missing");
   });
 
-  it("refuses a key the schema closes off", () => {
-    // Arrange
+  it("allows an extra key, which zod drops", () => {
+    // Arrange: the SDK sends the object closed, but messages.parse accepts.
     const reply = { ...good, extra: 1 };
 
     // Act
     const miss = schemaMismatch(reply, letter);
 
     // Assert
-    expect(miss).toBe("$.extra is not allowed");
+    expect(miss).toBeNull();
+  });
+
+  it("allows a missing field that has a default, which zod fills in", () => {
+    // Arrange: Maestro's skill kind defaults to "practice".
+    const schema = zodOutputFormat(
+      z.object({
+        kind: z.enum(["speaking", "practice"]).default("practice"),
+        prompt: z.string().default(""),
+        name: z.string(),
+      }),
+    ).schema as Record<string, unknown>;
+
+    // Act
+    const misses = [schemaMismatch({ name: "x" }, schema), schemaMismatch({}, schema)];
+
+    // Assert
+    expect(misses).toEqual([null, "$.name is missing"]);
+  });
+
+  it("allows a filled z.record map, which the SDK sends as a closed object", () => {
+    // Arrange
+    const schema = zodOutputFormat(
+      z.object({ counts: z.record(z.string(), z.number()) }),
+    ).schema as Record<string, unknown>;
+
+    // Act
+    const miss = schemaMismatch({ counts: { apples: 3 } }, schema);
+
+    // Assert
+    expect(miss).toBeNull();
   });
 
   it("refuses a fraction where an integer is required", () => {

@@ -190,6 +190,76 @@ describe("fetch handler with a structured request", () => {
     );
   });
 
+  it("accepts JSON in a code fence, as lenient readers like Knox do", async () => {
+    // Arrange
+    const fenced = {
+      id: "chatcmpl-5",
+      choices: [
+        {
+          message: { role: "assistant", content: '```json\n{"docType":"eob"}\n```' },
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(fenced)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+  });
+
+  it("never shuts a tier because a missing field's name holds a quota word", async () => {
+    // Arrange: the reply misses a field called quotaLeft.
+    const store = new Map<string, string>();
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+    };
+    const quotaSchema = {
+      type: "object",
+      properties: { quotaLeft: { type: "integer" } },
+      required: ["quotaLeft"],
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "how much is left" }],
+        output_config: { format: { type: "json_schema", schema: quotaSchema } },
+      }),
+    });
+    const missing = {
+      id: "chatcmpl-6",
+      choices: [{ message: { role: "assistant", content: "{}" } }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(missing)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      CIRCUIT: kv,
+      AI: { run: async () => ({ response: '{"quotaLeft":3}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(store.has("circuit:groq")).toBe(false);
+  });
+
   it("keeps a reply that only calls a tool", async () => {
     // Arrange: the SDK leaves parsed_output null for a tool-only reply and
     // does not throw, so the gateway must pass it on.

@@ -56,6 +56,7 @@ import {
 import { synthesizeAnthropicSSE } from "./sse.js";
 import { extractOutputSchema } from "./structured-output.js";
 import { schemaMismatch } from "./schema-check.js";
+import { RequestShapeError } from "./upstream-error.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
 import type { DailyStats, StatsEvent } from "./stats-do.js";
 import type { CachedResponse } from "./cache-do.js";
@@ -1133,7 +1134,7 @@ async function rejectOffSchemaReply(
   // without an error, so only text the SDK will parse is checked.
   const problem = firstSchemaProblem(texts, format.schema);
   if (problem) {
-    throw new Error(
+    throw new RequestShapeError(
       `${tier} reply off schema: ${problem} (stop_reason ${msg.stop_reason})`,
     );
   }
@@ -1146,7 +1147,7 @@ function firstSchemaProblem(
   for (const text of texts) {
     let value: unknown;
     try {
-      value = JSON.parse(text);
+      value = JSON.parse(unfenced(text));
     } catch {
       return "it is not JSON";
     }
@@ -1154,6 +1155,15 @@ function firstSchemaProblem(
     if (miss) return miss;
   }
   return null;
+}
+
+/**
+ * JSON wrapped in a Markdown code fence. Apps that read the reply leniently
+ * (Knox strips fences) accept it, so it is checked rather than refused.
+ */
+function unfenced(text: string): string {
+  const m = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
+  return m ? (m[1] as string) : text;
 }
 
 async function invokeTier(
