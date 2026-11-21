@@ -17,7 +17,13 @@ import type {
   AnthropicMessagesRequest,
 } from "./types.js";
 import { authenticate } from "./auth.js";
-import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
+import {
+  decideRoute,
+  estimateInputTokens,
+  LONG_CONTEXT_THRESHOLD,
+  type BackendKind,
+  type RouteChain,
+} from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import {
@@ -54,7 +60,19 @@ import {
   writeCache,
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
+import { extractOutputSchema } from "./structured-output.js";
+import { schemaMismatch } from "./schema-check.js";
+import { RequestShapeError } from "./upstream-error.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
+import {
+  callerDeadline,
+  chainBudgetMs,
+  paidHasTime,
+  tierLimitMs,
+  TierTimeoutError,
+  TIMEOUT_TRIP_MS,
+  withTimeLimit,
+} from "./time-limit.js";
 import type { DailyStats, StatsEvent } from "./stats-do.js";
 import type { CachedResponse } from "./cache-do.js";
 // Re-export the DO classes so the Workers runtime can find them.
@@ -108,6 +126,13 @@ interface Env {
   CACHE_TTL_SECONDS?: string;
   /** Per-IP request cap per minute. Default 200. Set to 0 to disable. */
   RATE_LIMIT_PER_MIN?: string;
+  /** Time all free tiers of one request may take together. Default 80 s. */
+  CHAIN_TIME_LIMIT_MS?: string;
+  /**
+   * Comma-separated `x-fortune-consumer` names whose prompts never go to a
+   * tier that may keep them (route.ts MAY_KEEP_PROMPTS).
+   */
+  PRIVATE_CONSUMERS?: string;
   /**
    * Durable Object that owns the stats counters. Atomic increments via
    * SQL UPSERT inside the DO actor — no lost updates, no read lag.
@@ -557,6 +582,11 @@ async function runChain(
 ): Promise<ChainResult> {
   const errors: Array<{ tier: BackendKind; error: string }> = [];
   const skipped: Array<{ tier: BackendKind; until: number }> = [];
+  const clientTimeout = request.headers.get("x-stainless-timeout");
+  const startedAt = Date.now();
+  const deadline = startedAt + chainBudgetMs(env.CHAIN_TIME_LIMIT_MS, clientTimeout);
+  const callerLeaves = callerDeadline(clientTimeout, startedAt);
+  const longContext = estimateInputTokens(effectiveParsed) > LONG_CONTEXT_THRESHOLD;
 
   for (let i = 0; i < chain.tiers.length; i++) {
     const tier = chain.tiers[i];
@@ -573,15 +603,32 @@ async function runChain(
       }
     }
 
+    const left = deadline - Date.now();
+    if (tier !== "anthropic" && left <= 0) {
+      errors.push({ tier, error: `${tier} not tried: time budget spent` });
+      continue;
+    }
+    if (tier === "anthropic" && !paidHasTime(callerLeaves, Date.now())) {
+      errors.push({ tier, error: "anthropic not tried: caller about to give up" });
+      continue;
+    }
+
     try {
-      const resp = await invokeTier(
+      const resp = await invokeTimed(
         tier,
+        left,
+        longContext,
         env,
         effectiveParsed,
         request,
         rawBody,
       );
-      if (tier !== "anthropic") await rejectEmptyReply(tier, resp);
+      if (tier === "anthropic") {
+        await rejectCappedPaid(resp);
+      } else {
+        await rejectEmptyReply(tier, resp);
+        await rejectOffSchemaReply(tier, resp, effectiveParsed);
+      }
       const headers = routeHeaders(resp, tier, chain, errors, skipped);
 
       // Only cache 200 JSON responses — SSE responses (which only appear
@@ -632,6 +679,33 @@ async function runChain(
   }
 
   return { ok: false, errors, skipped };
+}
+
+/**
+ * One tier call under its time limit: the tier's own limit or what is left
+ * of the chain budget, whichever is shorter. Paid Anthropic is the last
+ * resort and runs without either.
+ */
+function invokeTimed(
+  tier: BackendKind,
+  left: number,
+  longContext: boolean,
+  env: Env,
+  parsed: AnthropicMessagesRequest,
+  request: Request,
+  rawBody: string,
+): Promise<Response> {
+  if (tier === "anthropic") return invokeTier(tier, env, parsed, request, rawBody);
+  const own = longContext
+    ? undefined
+    : tierLimitMs(tier, env as unknown as Record<string, unknown>);
+  const ownLimit = own !== undefined && own <= left;
+  const ms = ownLimit ? own : left;
+  return withTimeLimit(
+    (signal) => invokeTier(tier, env, parsed, request, rawBody, signal),
+    ms,
+    () => new TierTimeoutError(tier, ms, ownLimit),
+  );
 }
 
 // Copies the tier's headers and adds the gateway's routing diagnostics.
@@ -740,13 +814,52 @@ async function tripOnQuota(
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
-  const ms = tripMsFor(err, tripDurationMs);
+  // A tier that ran out its own limit (about 3x the slowest reply measured)
+  // is hanging, so skip it briefly; a call the chain budget cut short says
+  // nothing about the tier.
+  const ms =
+    err instanceof TierTimeoutError
+      ? err.ownLimit
+        ? TIMEOUT_TRIP_MS
+        : 0
+      : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
-// Builds the final 503 response after all chain tiers are exhausted.
-// Distinguishes pure quota (all skipped, no errors), mixed (some skipped
-// + some errored), and all-errored cases.
+/**
+ * Paid Anthropic answers 400 invalid_request_error "You have reached your
+ * specified API usage limits. You will regain access on 2026-12-01 at 00:00
+ * UTC." when its spend cap is hit. Passed on, apps read that as their own
+ * bad request; as a failed tier it ends in the gateway's typed busy answer.
+ */
+async function rejectCappedPaid(resp: Response): Promise<void> {
+  if (resp.status !== 400) return;
+  let message = "";
+  try {
+    const body = (await resp.clone().json()) as { error?: { message?: string } };
+    message = body.error?.message ?? "";
+  } catch {
+    return;
+  }
+  if (!/usage limits?/i.test(message)) return;
+  const until = /regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC/i.exec(
+    message,
+  );
+  const when = until ? `${until[1]}T${until[2]}:00Z` : "unknown";
+  throw new Error(`Anthropic 400 capped until ${when}`);
+}
+
+/** Shown to people by apps: plain, and true whatever the tiers say. */
+const BUSY_MESSAGE =
+  "Every free model is busy or out right now. Try again in a few minutes.";
+/** Shortest wait suggested in retry-after, in seconds. */
+const MIN_RETRY_AFTER_S = 60;
+
+// Builds the final 503 response after all chain tiers are exhausted. The
+// error types stay as before (local-routines match them, and read the
+// "open until <ISO>" times in `detail`); the message is plain, retry-after
+// says when the first tier reopens, and x-should-retry stops the SDKs
+// retrying a chain that just failed end to end.
 function chainExhaustedResponse(
   errors: Array<{ tier: BackendKind; error: string }>,
   skipped: Array<{ tier: BackendKind; until: number }>,
@@ -754,66 +867,45 @@ function chainExhaustedResponse(
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Response {
-  const headers: HeadersInit = {
+  statsEvents.push({ kind: "error" });
+  flushStats();
+  const soonest = Math.min(...skipped.map((s) => s.until));
+  const retryAfterS = Number.isFinite(soonest)
+    ? Math.max(MIN_RETRY_AFTER_S, Math.ceil((soonest - Date.now()) / 1000))
+    : MIN_RETRY_AFTER_S;
+  const headers: Record<string, string> = {
     "content-type": "application/json",
     "access-control-allow-origin": "*",
     "access-control-expose-headers": EXPOSE_HEADERS,
+    "retry-after": String(retryAfterS),
+    "x-should-retry": "false",
   };
   if (skipped.length > 0) {
-    (headers as Record<string, string>)["x-fortune-llm-skipped"] =
-      formatSkippedHeader(skipped);
+    headers["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
   }
-  statsEvents.push({ kind: "error" });
-  flushStats();
-
-  if (skipped.length > 0 && errors.length === 0) {
-    // Every tier in the chain had its circuit open — pure quota state.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${skipped
-            .map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            )
-            .join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  if (skipped.length > 0) {
-    // Mixed: some tiers skipped (quota), some failed (other reasons).
-    // Still a 503 quota_exhausted because the dominant signal is that
-    // the backends are throttled — but include the failed-tier errors
-    // so debugging is possible.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${[
-            ...skipped.map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            ),
-            ...errors.map((e) => `${e.tier} (failed)`),
-          ].join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  return jsonError(
-    503,
-    "all_backends_failed",
-    `All free backends in chain [${chain.tiers.join(",")}] failed: ${errors
-      .map((e) => e.tier)
-      .join(", ")}.`,
+  const capped = errors
+    .map((e) => /capped until (\S+)/.exec(e.error)?.[1])
+    .find((d) => d !== undefined);
+  const detail = [
+    ...skipped.map(
+      (s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`,
+    ),
+    ...errors.map((e) => `${e.tier} (${errorLabel(e.error)})`),
+  ].join(", ");
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: skipped.length > 0 ? "quota_exhausted" : "all_backends_failed",
+        message: BUSY_MESSAGE,
+        detail:
+          `all backends unavailable in chain [${chain.tiers.join(",")}]: ` +
+          detail,
+        retry_after_s: retryAfterS,
+        ...(capped ? { paid_capped_until: capped } : {}),
+      },
+    }),
+    { status: 503, headers },
   );
 }
 
@@ -986,7 +1078,16 @@ export default {
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
+      privateConsumer: isPrivateConsumer(request, env.PRIVATE_CONSUMERS),
     });
+    if (chain.tiers.length === 0) {
+      return jsonError(
+        400,
+        "invalid_request_error",
+        `This caller's prompts stay off tiers that may keep them, and ` +
+          `${route ?? "this request"} is one of them.`,
+      );
+    }
 
     warnIfCircuitMissing(env);
     const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
@@ -1053,7 +1154,7 @@ const SINGLE_MODEL_TIERS = {
       keyName: keyof Env;
       model: (env: Env) => string;
       call: (
-        opts: { apiKey: string; model: string },
+        opts: { apiKey: string; model: string; signal?: AbortSignal },
         req: AnthropicMessagesRequest,
       ) => Promise<Response>;
     }
@@ -1107,16 +1208,78 @@ async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void
   if (!said) throw new Error(`${tier} returned an empty reply`);
 }
 
+/**
+ * A structured request (`output_config` json_schema) is answered by a JSON
+ * object in every text block, which the SDK's `messages.parse` parses and
+ * checks (a reply with only a tool call has no text to check). A free model that returns something else (prose, cut-off JSON,
+ * an enum value outside the list) would fail there after the whole wait, so
+ * throwing here moves the chain to the next tier instead. Streams are left
+ * alone, as in rejectEmptyReply.
+ */
+async function rejectOffSchemaReply(
+  tier: BackendKind,
+  resp: Response,
+  req: AnthropicMessagesRequest,
+): Promise<void> {
+  const format = extractOutputSchema(req);
+  const type = resp.headers.get("content-type") ?? "";
+  if (!format || resp.status !== 200 || !type.includes("application/json")) return;
+  let msg: AnthropicMessageResponse;
+  try {
+    msg = (await resp.clone().json()) as AnthropicMessageResponse;
+  } catch {
+    return;
+  }
+  const texts = (Array.isArray(msg.content) ? msg.content : []).flatMap((b) =>
+    b.type === "text" ? [b.text] : [],
+  );
+  // No text block (a tool call only) leaves the SDK's parsed_output null
+  // without an error, so only text the SDK will parse is checked.
+  const problem = firstSchemaProblem(texts, format.schema);
+  if (problem) {
+    throw new RequestShapeError(
+      `${tier} reply off schema: ${problem} (stop_reason ${msg.stop_reason})`,
+    );
+  }
+}
+
+function firstSchemaProblem(
+  texts: string[],
+  schema: Record<string, unknown>,
+): string | null {
+  for (const text of texts) {
+    let value: unknown;
+    try {
+      value = JSON.parse(unfenced(text));
+    } catch {
+      return "it is not JSON";
+    }
+    const miss = schemaMismatch(value, schema);
+    if (miss) return miss;
+  }
+  return null;
+}
+
+/**
+ * JSON wrapped in a Markdown code fence. Apps that read the reply leniently
+ * (Knox strips fences) accept it, so it is checked rather than refused.
+ */
+function unfenced(text: string): string {
+  const m = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
+  return m ? (m[1] as string) : text;
+}
+
 async function invokeTier(
   tier: BackendKind,
   env: Env,
   parsed: AnthropicMessagesRequest,
   request: Request,
   rawBody: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (tier === "workers-ai") {
     const model = env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it";
-    const resp = await callWorkersAi(env.AI, model, parsed);
+    const resp = await callWorkersAi(env.AI, model, parsed, signal);
     return withTierHeaders(resp, { "x-fortune-llm-model": model });
   }
   // BYOK: every non-workers-ai tier supports per-request key override via
@@ -1143,6 +1306,7 @@ async function invokeTier(
       models,
       parsed,
       isKeyError,
+      signal,
     );
     return withTierHeaders(
       resp,
@@ -1160,7 +1324,7 @@ async function invokeTier(
     const resolved = resolveKey(tier, env[spec.keyName]);
     if (!resolved) throw new Error(`${spec.keyName} not configured`);
     const model = spec.model(env);
-    const resp = await spec.call({ apiKey: resolved.key, model }, parsed);
+    const resp = await spec.call({ apiKey: resolved.key, model, signal }, parsed);
     return withTierHeaders(
       resp,
       { "x-fortune-llm-model": model },
@@ -1172,7 +1336,7 @@ async function invokeTier(
     if (!resolved) throw new Error("OPENROUTER_API_KEY not configured");
     const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
     const resp = await callOpenRouter(
-      { apiKey: resolved.key, models },
+      { apiKey: resolved.key, models, signal },
       parsed,
     );
     return withTierHeaders(
@@ -1215,9 +1379,14 @@ function formatPriorErrorsHeader(
   errors: Array<{ tier: BackendKind; error: string }>,
 ): string {
   return errors
-    .map((e) => `${e.tier}:${(e.error.split(":")[0] ?? "").slice(0, 80)}`)
+    .map((e) => `${e.tier}:${errorLabel(e.error)}`)
     .join(" | ")
     .replace(/[\x00-\x1f\x7f]+/g, " ");
+}
+
+/** The leading `<Label> <status>` part of a tier error, never the raw body. */
+function errorLabel(error: string): string {
+  return (error.split(":")[0] ?? "").slice(0, 80);
 }
 
 function formatSkippedHeader(
@@ -1226,6 +1395,20 @@ function formatSkippedHeader(
   return skipped
     .map((s) => `${s.tier}:${new Date(s.until).toISOString()}`)
     .join(",");
+}
+
+/**
+ * A caller listed in PRIVATE_CONSUMERS. The header is not proof of who is
+ * calling, but claiming a name only makes the claimant's own routing more
+ * private, so nothing is gained by spoofing it.
+ */
+function isPrivateConsumer(request: Request, list: string | undefined): boolean {
+  const name = request.headers.get("x-fortune-consumer")?.trim().toLowerCase();
+  if (!name || !list) return false;
+  return list
+    .split(",")
+    .map((n) => n.trim().toLowerCase())
+    .includes(name);
 }
 
 /** The development token is for free-tier runs only; paid Anthropic needs the main token. */

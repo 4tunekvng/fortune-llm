@@ -25,6 +25,7 @@ const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
 export interface CallMistralOptions {
   apiKey: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 export async function callMistral(
@@ -37,6 +38,7 @@ export async function callMistral(
       url: MISTRAL_URL,
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
     },
     req,
   );

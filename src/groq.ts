@@ -31,6 +31,7 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 export interface CallGroqOptions {
   apiKey: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 export async function callGroq(
@@ -43,6 +44,7 @@ export async function callGroq(
       url: GROQ_URL,
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
     },
     req,
   );

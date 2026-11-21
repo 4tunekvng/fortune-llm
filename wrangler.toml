@@ -26,6 +26,11 @@ DEFAULT_OPENROUTER_MODELS = "google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-
 RATE_LIMIT_PER_MIN_KNOX = "200"
 RATE_LIMIT_PER_MIN_DATA_SCIENCE_AGENT = "200"
 
+# Callers (x-fortune-consumer) whose prompts never go to a free tier that may
+# keep or learn from them: gemini, openrouter, mistral, github-models. Knox
+# sends people's health insurance letters.
+PRIVATE_CONSUMERS = "knox"
+
 # Free-first chain with paid Anthropic as auto-last-resort. Each free
 # provider is an independent quota pool, so the more keys you have set,
 # the higher the daily ceiling before anthropic is reached.
@@ -59,10 +64,12 @@ binding = "AI"
 #   CIRCUIT_TRIP_DURATION_MS = "1800000"   # circuit breaker trip duration, default 1h
 #   CACHE_TTL_SECONDS        = "86400"     # response cache TTL, default 24h, 0 disables
 #   RATE_LIMIT_PER_MIN       = "200"       # per-IP req/min, default 200, 0 disables
+#   CHAIN_TIME_LIMIT_MS      = "80000"     # all free tiers of one request together
+#   TIER_TIME_LIMIT_MS_GEMINI = "20000"    # one tier's own limit (README "Time limits")
 #
 # A consumer (x-fortune-consumer) gets its own rate-limit bucket only once
-# registered here; any other name, and the development token, stay
-# IP-scoped (issue #19). See RATE_LIMIT_PER_MIN_<CONSUMER> in [vars].
+# registered; any other name, and the development token, stay IP-scoped
+# (issue #19). See RATE_LIMIT_PER_MIN_<CONSUMER> in [vars].
 [[kv_namespaces]]
 binding = "CIRCUIT"
 id = "2ff745a8a79e47fd8a3728da8f81ce6d"
