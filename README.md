@@ -9,7 +9,7 @@ last-resort tier appended automatically when the worker has an
                 ┌──────────────────────────────────────────────────────────────────────────┐
 POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
                 ├──────────────────────────────────────────────────────────────────────────┤
-                │ default / tools[]     →  [groq, gemini, cerebras, mistral, github-models,│
+                │ default / tools[]     →  [gemini, groq, cerebras, mistral, github-models,│
                 │                           openrouter, workers-ai, *anthropic] fastest first│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
@@ -131,8 +131,10 @@ mistral and github-models. Those tiers are left out of every chain for them
 (text, tools, images, long context), and a private request pinned to one of
 them gets a 400. Knox sends people's health insurance letters. Claiming a
 name only makes the claimant's own routing more private, so the header needs
-no proof here. The cost: while groq is out, a private caller's free chain is
-groq, cerebras and workers-ai, so its replies are as slow as Workers AI.
+no proof here. A private caller's free chain is groq, cerebras and
+workers-ai; the other apps go to gemini before groq, which leaves groq's
+shared daily tokens for the callers that can't use gemini. While groq is
+out, a private caller's replies are as slow as Workers AI.
 
 ## Response cache
 
