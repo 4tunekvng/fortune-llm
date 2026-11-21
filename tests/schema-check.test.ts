@@ -134,6 +134,41 @@ describe("schemaMismatch on the SDK's output", () => {
   });
 });
 
+describe("schemaMismatch on the SDK's limit hints", () => {
+  const limited = zodOutputFormat(
+    z.object({
+      title: z.string().min(3).max(12).describe("A short title"),
+      n: z.number().gt(0).lte(10),
+      tips: z.array(z.object({ t: z.string() })).max(2),
+    }),
+  ).schema as Record<string, unknown>;
+  const ok = { title: "Appeal", n: 5, tips: [{ t: "a" }] };
+
+  it("accepts a reply inside every limit", () => {
+    // Act
+    const miss = schemaMismatch(ok, limited);
+
+    // Assert
+    expect(miss).toBeNull();
+  });
+
+  it("refuses what zod would refuse: length, range and count", () => {
+    // Act
+    const misses = [
+      schemaMismatch({ ...ok, title: "A very long title" }, limited),
+      schemaMismatch({ ...ok, n: 0 }, limited),
+      schemaMismatch({ ...ok, tips: [{ t: "a" }, { t: "b" }, { t: "c" }] }, limited),
+    ];
+
+    // Assert
+    expect(misses).toEqual([
+      "$.title is longer than 12",
+      "$.n is below its minimum",
+      "$.tips is longer than 2",
+    ]);
+  });
+});
+
 // Shapes written by hand, none of them used while writing the checker.
 describe("schemaMismatch on shapes beyond the apps' schemas", () => {
   const defs = {
@@ -208,7 +243,7 @@ describe("schemaMismatch on shapes beyond the apps' schemas", () => {
 
   it("ignores keywords it does not know", () => {
     // Arrange
-    const schema = { type: "string", format: "date", minLength: 99, "x-hint": 1 };
+    const schema = { type: "string", format: "date", "x-hint": 1 };
 
     // Act
     const miss = schemaMismatch("2026-11-21", schema);
