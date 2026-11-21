@@ -216,7 +216,7 @@ describe("fetch handler with a structured request", () => {
     expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
   });
 
-  it("never shuts a tier because a missing field's name holds a quota word", async () => {
+  it("never shuts a tier when a missing field's name holds a quota word", async () => {
     // Arrange: the reply misses a field called quotaLeft.
     const store = new Map<string, string>();
     const kv = {

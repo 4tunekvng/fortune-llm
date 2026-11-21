@@ -78,7 +78,10 @@ describe("schemaMismatch on the SDK's output", () => {
     ).schema as Record<string, unknown>;
 
     // Act
-    const misses = [schemaMismatch({ name: "x" }, schema), schemaMismatch({}, schema)];
+    const misses = [
+      schemaMismatch({ name: "x" }, schema),
+      schemaMismatch({}, schema),
+    ];
 
     // Assert
     expect(misses).toEqual([null, "$.name is missing"]);
