@@ -10,10 +10,12 @@
  *     (good replies up to 60 s) and workers-ai (64 s and more) have no own
  *     limit; they sit last in the chain and only the chain budget bounds
  *     them. Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
- *   - The chain budget shared by all free tiers: `CHAIN_TIME_LIMIT_MS`
- *     (default 80 s, under Knox's 90 s and Leggo's 100 s deadlines), cut to
- *     the caller's own timeout less 2 s when the SDK sends it in
- *     `X-Stainless-Timeout`, so the caller gets an answer before it hangs up.
+ *   - The chain budget shared by all free tiers: the caller's own timeout
+ *     less 2 s when the SDK sends it in `X-Stainless-Timeout`, so the caller
+ *     gets an answer before it hangs up and a caller that chose to wait
+ *     longer (Maestro gives a plan 100 s) is not cut short; otherwise
+ *     `CHAIN_TIME_LIMIT_MS` (default 80 s, under Knox's 90 s and Leggo's
+ *     100 s deadlines).
  *
  * Paid Anthropic gets neither: it is the last resort and runs as before,
  * except that it is not started when the caller has told us it will hang
@@ -67,11 +69,11 @@ export function chainBudgetMs(
   envValue: string | undefined,
   stainlessTimeout: string | null,
 ): number {
-  const base = positiveMs(envValue) ?? DEFAULT_CHAIN_TIME_LIMIT_MS;
   const clientSeconds = positiveMs(stainlessTimeout);
-  if (clientSeconds === undefined) return base;
-  const client = clientSeconds * 1000 - CLIENT_MARGIN_MS;
-  return Math.min(base, Math.max(MIN_BUDGET_MS, client));
+  if (clientSeconds === undefined) {
+    return positiveMs(envValue) ?? DEFAULT_CHAIN_TIME_LIMIT_MS;
+  }
+  return Math.max(MIN_BUDGET_MS, clientSeconds * 1000 - CLIENT_MARGIN_MS);
 }
 
 /** When the caller will hang up, from the SDK's timeout header, if it said. */
