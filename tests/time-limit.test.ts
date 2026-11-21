@@ -80,6 +80,7 @@ describe("chainBudgetMs", () => {
     // Act
     const budgets = [
       chainBudgetMs(undefined, "20"), // TypeScript SDK, whole seconds
+      chainBudgetMs("80000", "100"), // a caller that chose to wait longer
       chainBudgetMs(undefined, "600.0"), // Python SDK default
       chainBudgetMs(undefined, "NOT_GIVEN"), // Python SDK, no timeout set
       chainBudgetMs(undefined, null), // curl or fetch
@@ -89,7 +90,9 @@ describe("chainBudgetMs", () => {
     ];
 
     // Assert
-    expect(budgets).toEqual([18_000, 80_000, 80_000, 80_000, 5_000, 30_000, 80_000]);
+    expect(budgets).toEqual([
+      18_000, 98_000, 598_000, 80_000, 80_000, 5_000, 30_000, 80_000,
+    ]);
   });
 });
 
