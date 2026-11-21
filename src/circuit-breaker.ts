@@ -20,7 +20,7 @@
  * intentionally NOT tripped — they're worth retrying.
  */
 import type { BackendKind } from "./route.js";
-import { UpstreamError } from "./upstream-error.js";
+import { RequestShapeError, UpstreamError } from "./upstream-error.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 export const DEFAULT_TRIP_DURATION_MS = HOUR_MS; // 1h
@@ -53,6 +53,7 @@ export interface CircuitState {
  * next request — they're transient, not a quota signal.
  */
 export function isQuotaError(error: unknown): boolean {
+  if (error instanceof RequestShapeError) return false;
   // A provider's HTTP status says it outright; 403 can be a quota or a
   // refusal, so only its wording decides.
   if (error instanceof UpstreamError && error.status !== 403) return error.status === 429;

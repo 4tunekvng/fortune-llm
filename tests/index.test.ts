@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 
 import worker from "../src/index.js";
@@ -91,6 +91,309 @@ describe("fetch handler with an empty reply", () => {
     expect(await resp.json()).toMatchObject({
       content: [{ type: "text", text: "hello from workers ai" }],
     });
+  });
+});
+
+describe("fetch handler with a structured request", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const schema = {
+    type: "object",
+    properties: { docType: { enum: ["eob", "denial"] } },
+    required: ["docType"],
+    additionalProperties: false,
+  };
+
+  function structuredRequest(): Request {
+    return new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "read this letter" }],
+        output_config: { format: { type: "json_schema", schema } },
+      }),
+    });
+  }
+
+  it("moves past a tier whose reply misses the schema", async () => {
+    // Arrange: Groq answers an enum value outside the list (issue #28),
+    // Workers AI answers in the schema.
+    const offSchema = {
+      id: "chatcmpl-1",
+      choices: [
+        { message: { role: "assistant", content: '{"docType":"Denial Letter"}' } },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(offSchema)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: '{"docType":"denial"}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
+      /^groq:groq reply off schema \| /,
+    );
+    expect(console.error).toHaveBeenCalledWith(
+      "fortune-llm: tier groq failed:",
+      "groq reply off schema: $.docType is not one of the allowed values " +
+        "(stop_reason end_turn)",
+    );
+    expect(await resp.json()).toMatchObject({
+      content: [{ type: "text", text: '{"docType":"denial"}' }],
+    });
+  });
+
+  it("moves past a tier whose reply is cut off mid-JSON", async () => {
+    // Arrange: Groq hits max_tokens inside the object.
+    const cut = {
+      id: "chatcmpl-2",
+      choices: [
+        {
+          message: { role: "assistant", content: '{"docType":"den' },
+          finish_reason: "length",
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(cut)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: '{"docType":"eob"}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(console.error).toHaveBeenCalledWith(
+      "fortune-llm: tier groq failed:",
+      "groq reply off schema: it is not JSON (stop_reason max_tokens)",
+    );
+  });
+
+  it("accepts JSON in a code fence, as lenient readers like Knox do", async () => {
+    // Arrange
+    const fenced = {
+      id: "chatcmpl-5",
+      choices: [
+        {
+          message: { role: "assistant", content: '```json\n{"docType":"eob"}\n```' },
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(fenced)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+  });
+
+  it("never shuts a tier over a quota word in a field name", async () => {
+    // Arrange: the reply misses a field called quotaLeft.
+    const store = new Map<string, string>();
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+    };
+    const quotaSchema = {
+      type: "object",
+      properties: { quotaLeft: { type: "integer" } },
+      required: ["quotaLeft"],
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "how much is left" }],
+        output_config: { format: { type: "json_schema", schema: quotaSchema } },
+      }),
+    });
+    const missing = {
+      id: "chatcmpl-6",
+      choices: [{ message: { role: "assistant", content: "{}" } }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(missing)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      CIRCUIT: kv,
+      AI: { run: async () => ({ response: '{"quotaLeft":3}' }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(store.has("circuit:groq")).toBe(false);
+  });
+
+  it("keeps a reply that only calls a tool", async () => {
+    // Arrange: the SDK leaves parsed_output null for a tool-only reply and
+    // does not throw, so the gateway must pass it on.
+    const toolOnly = {
+      id: "chatcmpl-4",
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "lookup", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(toolOnly)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+    expect(await resp.json()).toMatchObject({
+      content: [{ type: "tool_use", name: "lookup" }],
+    });
+  });
+
+  it("keeps the first tier when its reply matches", async () => {
+    // Arrange
+    const inSchema = {
+      id: "chatcmpl-3",
+      choices: [{ message: { role: "assistant", content: '{"docType":"eob"}' } }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(inSchema)));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GROQ_API_KEY: "gsk_test_key_123",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(structuredRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBeNull();
+  });
+});
+
+describe("fetch handler for a private caller", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function knoxRequest(metadata: Record<string, unknown> = {}): Request {
+    return new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": "gateway-token",
+        "content-type": "application/json",
+        "x-fortune-consumer": "Knox",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "read my letter" }],
+        metadata,
+      }),
+    });
+  }
+
+  it("never sends a listed caller's prompt to Gemini", async () => {
+    // Arrange: Gemini would answer; Workers AI is the private fallback.
+    const fetchMock = vi.fn(async () =>
+      Response.json({ candidates: [{ content: { parts: [{ text: "gemini" }] } }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GEMINI_API_KEY: "gemini-key",
+      PRIVATE_CONSUMERS: "knox, other",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "hello from workers ai" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(knoxRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-chain")).toBe("groq,cerebras,workers-ai");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a listed caller's request pinned to Gemini", async () => {
+    // Arrange
+    const fetchMock = vi.fn(async () => new Response("unexpected", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GEMINI_API_KEY: "gemini-key",
+      PRIVATE_CONSUMERS: "knox",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(
+      knoxRequest({ fortune_route: "gemini" }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

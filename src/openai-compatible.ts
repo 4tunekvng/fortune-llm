@@ -60,6 +60,8 @@ export interface OpenAICompatibleConfig {
   extraHeaders?: Record<string, string>;
   /** Optional extra request-body fields (shallow-merged into the request JSON). */
   extraBody?: Record<string, unknown>;
+  /** Cancels the call when the gateway's time limit for this tier runs out. */
+  signal?: AbortSignal;
 }
 
 interface OpenAIChoice {
@@ -150,6 +152,7 @@ export async function callOpenAICompatible(
     method: "POST",
     headers,
     body: JSON.stringify(httpBody),
+    signal: config.signal,
   });
 
   if (!upstream.ok) {
