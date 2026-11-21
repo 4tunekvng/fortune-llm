@@ -128,6 +128,11 @@ interface Env {
   /** Time all free tiers of one request may take together. Default 80 s. */
   CHAIN_TIME_LIMIT_MS?: string;
   /**
+   * Comma-separated `x-fortune-consumer` names whose prompts never go to a
+   * tier that may keep them (route.ts MAY_KEEP_PROMPTS).
+   */
+  PRIVATE_CONSUMERS?: string;
+  /**
    * Durable Object that owns the stats counters. Atomic increments via
    * SQL UPSERT inside the DO actor — no lost updates, no read lag.
    * Optional only because tests-without-bindings shouldn't crash; in
@@ -1048,7 +1053,16 @@ export default {
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
+      privateConsumer: isPrivateConsumer(request, env.PRIVATE_CONSUMERS),
     });
+    if (chain.tiers.length === 0) {
+      return jsonError(
+        400,
+        "invalid_request_error",
+        `This caller's prompts stay off tiers that may keep them, and ` +
+          `${route ?? "this request"} is one of them.`,
+      );
+    }
 
     warnIfCircuitMissing(env);
     const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
@@ -1351,6 +1365,20 @@ function formatSkippedHeader(
   return skipped
     .map((s) => `${s.tier}:${new Date(s.until).toISOString()}`)
     .join(",");
+}
+
+/**
+ * A caller listed in PRIVATE_CONSUMERS. The header is not proof of who is
+ * calling, but claiming a name only makes the claimant's own routing more
+ * private, so nothing is gained by spoofing it.
+ */
+function isPrivateConsumer(request: Request, list: string | undefined): boolean {
+  const name = request.headers.get("x-fortune-consumer")?.trim().toLowerCase();
+  if (!name || !list) return false;
+  return list
+    .split(",")
+    .map((n) => n.trim().toLowerCase())
+    .includes(name);
 }
 
 /** The development token is for free-tier runs only; paid Anthropic needs the main token. */

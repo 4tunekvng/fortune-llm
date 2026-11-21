@@ -52,7 +52,7 @@ describe("fetch handler fallback chain", () => {
     expect(resp.status).toBe(200);
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     const priorErrors = resp.headers.get("x-fortune-llm-prior-errors");
-    expect(priorErrors).toMatch(/^groq:Groq 500 \| /);
+    expect(priorErrors).toMatch(/^gemini:[^|]+\| groq:Groq 500 \| /);
     expect(priorErrors).not.toContain("org_secret123");
   });
 });
@@ -86,7 +86,7 @@ describe("fetch handler with an empty reply", () => {
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
-      /^groq:groq returned an empty reply/,
+      /^gemini:GEMINI_API_KEY not configured \| groq:groq returned an empty reply/,
     );
     expect(await resp.json()).toMatchObject({
       content: [{ type: "text", text: "hello from workers ai" }],
@@ -147,7 +147,7 @@ describe("fetch handler with a structured request", () => {
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
-      /^groq:groq reply off schema \| /,
+      /^gemini:GEMINI_API_KEY not configured \| groq:groq reply off schema \| /,
     );
     expect(console.error).toHaveBeenCalledWith(
       "fortune-llm: tier groq failed:",
@@ -321,7 +321,81 @@ describe("fetch handler with a structured request", () => {
 
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("groq");
-    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBeNull();
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toBe(
+      "gemini:GEMINI_API_KEY not configured",
+    );
+  });
+});
+
+describe("fetch handler for a private caller", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function knoxRequest(metadata: Record<string, unknown> = {}): Request {
+    return new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": "gateway-token",
+        "content-type": "application/json",
+        "x-fortune-consumer": "Knox",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "read my letter" }],
+        metadata,
+      }),
+    });
+  }
+
+  it("never sends a listed caller's prompt to Gemini", async () => {
+    // Arrange: Gemini would answer; Workers AI is the private fallback.
+    const fetchMock = vi.fn(async () =>
+      Response.json({ candidates: [{ content: { parts: [{ text: "gemini" }] } }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GEMINI_API_KEY: "gemini-key",
+      PRIVATE_CONSUMERS: "knox, other",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "hello from workers ai" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(knoxRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-chain")).toBe("groq,cerebras,workers-ai");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a listed caller's request pinned to Gemini", async () => {
+    // Arrange
+    const fetchMock = vi.fn(async () => new Response("unexpected", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GEMINI_API_KEY: "gemini-key",
+      PRIVATE_CONSUMERS: "knox",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run: async () => ({ response: "unused" }) },
+    };
+
+    // Act
+    const resp = await worker.fetch(
+      knoxRequest({ fortune_route: "gemini" }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

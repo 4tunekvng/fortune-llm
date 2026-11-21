@@ -9,7 +9,8 @@ last-resort tier appended automatically when the worker has an
                 ┌──────────────────────────────────────────────────────────────────────────┐
 POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
                 ├──────────────────────────────────────────────────────────────────────────┤
-                │ default / tools[]     →  [groq, workers-ai, gemini, openrouter,*anthropic]│
+                │ default / tools[]     →  [gemini, groq, cerebras, mistral, github-models,│
+                │                           openrouter, workers-ai, *anthropic] fastest first│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
                 │ output_config (JSON)  →  same chains; a reply off the schema falls through│
@@ -120,6 +121,20 @@ abort signal) when the limit runs out, and the chain moves to the next tier.
 For a stream the limit covers the wait for the response to start; once it
 has started it is never cut. A prompt over 100K tokens gets no own tier limit (the speeds
 were measured on prompts under 10K tokens); only the chain budget bounds it.
+
+## Private callers
+
+`PRIVATE_CONSUMERS` (a comma list in `wrangler.toml`, `knox` today) names
+callers, by their `x-fortune-consumer` header, whose prompts must never reach
+a free tier whose provider may keep or learn from them: gemini, openrouter,
+mistral and github-models. Those tiers are left out of every chain for them
+(text, tools, images, long context), and a private request pinned to one of
+them gets a 400. Knox sends people's health insurance letters. Claiming a
+name only makes the claimant's own routing more private, so the header needs
+no proof here. A private caller's free chain is groq, cerebras and
+workers-ai; the other apps go to gemini before groq, which leaves groq's
+shared daily tokens for the callers that can't use gemini. While groq is
+out, a private caller's replies are as slow as Workers AI.
 
 ## Response cache
 

@@ -12,16 +12,63 @@ const baseReq = (overrides: Partial<AnthropicMessagesRequest> = {}): AnthropicMe
 // The default free chain stacks every independent free-quota pool. Centralized
 // here so future additions update one place.
 const DEFAULT_FREE_CHAIN = [
+  "gemini",
   "groq",
   "cerebras",
   "mistral",
-  "workers-ai",
-  "gemini",
   "github-models",
   "openrouter",
+  "workers-ai",
 ] as const;
 const LONG_CONTEXT_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
 const VISION_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
+
+describe("decideRoute for a private caller", () => {
+  it("leaves every tier that may keep prompts out of the default chain", () => {
+    // Arrange
+    const options = { privateConsumer: true, anthropicFallback: true };
+
+    // Act
+    const d = decideRoute(baseReq(), options);
+
+    // Assert
+    expect(d.tiers).toEqual(["groq", "cerebras", "workers-ai", "anthropic"]);
+  });
+
+  it("leaves them out of the vision chain too", () => {
+    // Arrange
+    const req = baseReq({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "x" },
+            },
+          ],
+        },
+      ],
+    } as Partial<AnthropicMessagesRequest>);
+
+    // Act
+    const d = decideRoute(req, { privateConsumer: true });
+
+    // Assert
+    expect(d.tiers).toEqual(["workers-ai"]);
+  });
+
+  it("returns no tier for a private request pinned to gemini", () => {
+    // Arrange
+    const req = baseReq({ metadata: { fortune_route: "gemini" } } as never);
+
+    // Act
+    const d = decideRoute(req, { privateConsumer: true });
+
+    // Assert
+    expect(d.tiers).toEqual([]);
+  });
+});
 
 describe("decideRoute", () => {
   it("defaults to the multi-provider free chain for plain text chat", () => {
@@ -30,10 +77,10 @@ describe("decideRoute", () => {
     expect(d.tiers).not.toContain("anthropic");
   });
 
-  it("routes tools[]-bearing requests through the same multi-provider chain (groq first)", () => {
+  it("routes tools[]-bearing requests through the same multi-provider chain (gemini first)", () => {
     const d = decideRoute(baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }));
     expect(d.tiers).toEqual([...DEFAULT_FREE_CHAIN]);
-    expect(d.tiers[0]).toBe("groq");
+    expect(d.tiers[0]).toBe("gemini");
     expect(d.tiers).not.toContain("anthropic");
     expect(d.reason).toMatch(/tools=1/);
   });

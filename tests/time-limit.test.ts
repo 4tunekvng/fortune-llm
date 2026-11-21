@@ -134,7 +134,7 @@ describe("fetch handler with a slow tier", () => {
     // Assert
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toMatch(
-      /^groq:groq timed out after 50 ms \| /,
+      /^gemini:GEMINI_API_KEY not configured \| groq:groq timed out after 50 ms \| /,
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.signal?.aborted).toBe(true);
