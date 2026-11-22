@@ -361,4 +361,29 @@ describe("runChain through the fetch handler", () => {
     // Assert
     expect(resp.status).toBe(400);
   });
+
+  it("answers from a later tier after Gemini refuses a non-ASCII field", async () => {
+    // Arrange
+    groqFails(500, "boom");
+    const tool = {
+      name: "t",
+      description: "pick a size",
+      input_schema: {
+        type: "object",
+        properties: { "\u540d": { type: "number", enum: [1, 2] } },
+      },
+    };
+    const env = makeEnv(new MapKv(), { GEMINI_API_KEY: "gemini-test-key" });
+
+    // Act
+    const resp = await worker.fetch(
+      messagesRequest({ tools: [tool] }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+  });
 });

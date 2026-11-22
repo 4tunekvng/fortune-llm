@@ -1360,7 +1360,8 @@ const EXPOSE_HEADERS =
  * Names each failed tier with only the leading `<Label> <status>` part of its
  * error (the text before the first colon). The rest is the raw upstream body,
  * which can carry account details, so it stays in `console.error`.
- * Control characters make `Headers.set` throw, which would discard the
+ * Control characters, and non-ASCII ones (a caller's field name
+ * in a schema error), make `Headers.set` throw, which would discard the
  * successful tier's response, so collapse them to spaces.
  */
 function formatPriorErrorsHeader(
@@ -1369,7 +1370,7 @@ function formatPriorErrorsHeader(
   return errors
     .map((e) => `${e.tier}:${errorLabel(e.error)}`)
     .join(" | ")
-    .replace(/[\x00-\x1f\x7f]+/g, " ");
+    .replace(/[^\x20-\x7e]+/g, " ");
 }
 
 /** The leading `<Label> <status>` part of a tier error, never the raw body. */
