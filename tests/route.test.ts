@@ -24,7 +24,8 @@ const LONG_CONTEXT_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
 const VISION_FREE_CHAIN = ["gemini", "openrouter", "workers-ai"] as const;
 
 describe("decideRoute for a private caller", () => {
-  it("leaves every tier that may keep prompts out of the default chain", () => {
+  it("keeps Gemini but leaves the other prompt-keeping tiers out of the default chain", () => {
+    // Fortune, 2026-11-22: "data can be sent to gemini".
     // Arrange
     const options = { privateConsumer: true, anthropicFallback: true };
 
@@ -32,7 +33,13 @@ describe("decideRoute for a private caller", () => {
     const d = decideRoute(baseReq(), options);
 
     // Assert
-    expect(d.tiers).toEqual(["groq", "cerebras", "workers-ai", "anthropic"]);
+    expect(d.tiers).toEqual([
+      "gemini",
+      "groq",
+      "cerebras",
+      "workers-ai",
+      "anthropic",
+    ]);
   });
 
   it("leaves them out of the vision chain too", () => {
@@ -55,7 +62,7 @@ describe("decideRoute for a private caller", () => {
     const d = decideRoute(req, { privateConsumer: true });
 
     // Assert
-    expect(d.tiers).toEqual(["workers-ai"]);
+    expect(d.tiers).toEqual(["gemini", "workers-ai"]);
   });
 
   it("honors a private request pinned to gemini", () => {
@@ -77,7 +84,7 @@ describe("decideRoute for a private caller", () => {
     const d = decideRoute(req, { privateConsumer: true });
 
     // Assert
-    expect(d.tiers).not.toContain("gemini");
+    expect(d.tiers).not.toContain("openrouter");
   });
 
   it("still filters a private request that asks for the free chain", () => {
@@ -88,7 +95,7 @@ describe("decideRoute for a private caller", () => {
     const d = decideRoute(req, { privateConsumer: true });
 
     // Assert
-    expect(d.tiers).toEqual(["groq", "cerebras", "workers-ai"]);
+    expect(d.tiers).toEqual(["gemini", "groq", "cerebras", "workers-ai"]);
   });
 });
 
