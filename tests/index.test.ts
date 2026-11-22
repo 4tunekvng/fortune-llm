@@ -373,9 +373,11 @@ describe("fetch handler for a private caller", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("refuses a listed caller's request pinned to Gemini", async () => {
-    // Arrange
-    const fetchMock = vi.fn(async () => new Response("unexpected", { status: 500 }));
+  it("sends a listed caller's request pinned to Gemini to Gemini", async () => {
+    // Arrange: the caller chose Gemini itself (Knox's backup reader).
+    const fetchMock = vi.fn(async () =>
+      Response.json({ candidates: [{ content: { parts: [{ text: "gemini" }] } }] }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const env = {
       GATEWAY_TOKEN: "gateway-token",
@@ -394,8 +396,8 @@ describe("fetch handler for a private caller", () => {
     );
 
     // Assert
-    expect(resp.status).toBe(400);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("gemini");
+    expect(fetchMock).toHaveBeenCalled();
   });
 });
 

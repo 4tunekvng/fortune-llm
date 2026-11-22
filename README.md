@@ -125,11 +125,13 @@ were measured on prompts under 10K tokens); only the chain budget bounds it.
 ## Private callers
 
 `PRIVATE_CONSUMERS` (a comma list in `wrangler.toml`, `knox` today) names
-callers, by their `x-fortune-consumer` header, whose prompts must never reach
-a free tier whose provider may keep or learn from them: gemini, openrouter,
-mistral and github-models. Those tiers are left out of every chain for them
-(text, tools, images, long context), and a private request pinned to one of
-them gets a 400. Knox sends people's health insurance letters. Claiming a
+callers, by their `x-fortune-consumer` header, whose prompts the gateway
+never sends on its own to a free tier whose provider may keep or learn from
+them: gemini, openrouter, mistral and github-models. Those tiers are left out
+of every chain the gateway picks for them (text, tools, images, long context).
+A private request that pins one tier in `metadata.fortune_route` gets that
+tier: the caller chose it in its own code. Knox pins gemini as its backup
+reader while groq is out (Fortune's call, 2026-11-22). Knox sends people's health insurance letters. Claiming a
 name only makes the claimant's own routing more private, so the header needs
 no proof here. A private caller's free chain is groq, cerebras and
 workers-ai; the other apps go to gemini before groq, which leaves groq's
