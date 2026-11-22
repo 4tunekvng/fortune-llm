@@ -349,8 +349,10 @@ describe("fetch handler for a private caller", () => {
     });
   }
 
-  it("never sends a listed caller's prompt to Gemini", async () => {
-    // Arrange: Gemini would answer; Workers AI is the private fallback.
+  it("sends a listed caller's prompt to Gemini but never to the other tiers that may keep it", async () => {
+    // Fortune, 2026-11-22: "data can be sent to gemini". OpenRouter, Mistral
+    // and GitHub Models stay out of a private caller's chain.
+    // Arrange: Gemini answers.
     const fetchMock = vi.fn(async () =>
       Response.json({ candidates: [{ content: { parts: [{ text: "gemini" }] } }] }),
     );
@@ -368,9 +370,10 @@ describe("fetch handler for a private caller", () => {
     const resp = await worker.fetch(knoxRequest(), env as never, ctx as never);
 
     // Assert
-    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
-    expect(resp.headers.get("x-fortune-llm-chain")).toBe("groq,cerebras,workers-ai");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("gemini");
+    expect(resp.headers.get("x-fortune-llm-chain")).toBe(
+      "gemini,groq,cerebras,workers-ai",
+    );
   });
 
   it("sends a listed caller's request pinned to Gemini to Gemini", async () => {

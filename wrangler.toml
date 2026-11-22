@@ -27,8 +27,8 @@ RATE_LIMIT_PER_MIN_KNOX = "200"
 RATE_LIMIT_PER_MIN_DATA_SCIENCE_AGENT = "200"
 
 # Callers (x-fortune-consumer) whose prompts never go to a free tier that may
-# keep or learn from them: gemini, openrouter, mistral, github-models. Knox
-# sends people's health insurance letters.
+# keep or learn from them: openrouter, mistral, github-models. Knox sends
+# people's health insurance letters. Gemini is allowed (Fortune, 2026-11-22).
 PRIVATE_CONSUMERS = "knox"
 
 # Free-first chain with paid Anthropic as auto-last-resort. Each free

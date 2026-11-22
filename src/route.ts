@@ -80,13 +80,13 @@ export interface DecideRouteOptions {
 }
 
 /**
- * Free tiers whose providers may keep what they are sent or learn from it:
- * Gemini's unpaid tier, OpenRouter's `:free` model hosts, Mistral's free
- * plan, and GitHub Models (prompts are logged for abuse monitoring). A
- * private caller's chain leaves them out.
+ * Free tiers whose providers may keep what they are sent or learn from it,
+ * which a private caller's chain leaves out: OpenRouter's `:free` model
+ * hosts, Mistral's free plan, and GitHub Models (prompts are logged for abuse
+ * monitoring). Gemini's unpaid tier may keep prompts too, but Fortune allowed
+ * it for every app's data on 2026-11-22 ("data can be sent to gemini").
  */
 const MAY_KEEP_PROMPTS: ReadonlySet<BackendKind> = new Set<BackendKind>([
-  "gemini",
   "openrouter",
   "mistral",
   "github-models",
@@ -215,9 +215,8 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   //   gemini         — 1-7 s; per-Google-API-key quota (multi-key rotation)
   //   groq           — about 3 s, native tool use. Its 200K tokens a day are
   //                    shared by every app and were spent by morning on
-  //                    2026-11-21, and it is the one fast tier a private
-  //                    caller may use, so apps that may use gemini go there
-  //                    first and leave groq for the ones that can't.
+  //                    2026-11-21, so gemini goes first and groq is the
+  //                    second fast tier for every caller, private included.
   //   cerebras       — fast when it works; fails in under 1 s (402 today)
   //   mistral        — free experimental tier; fails in under 1 s (429 today)
   //   github-models  — Azure-backed, free with any GitHub account
