@@ -325,6 +325,7 @@ function rejectFreeFormMap(node: Record<string, unknown>, path: string): void {
   // The SDK writes a z.record map as a closed object with no properties and
   // its key rule in the description.
   const sdkRecord =
+    node.type === "object" &&
     typeof node.description === "string" &&
     node.description.includes("propertyNames");
   if ((node.additionalProperties || sdkRecord) && !hasProps) {

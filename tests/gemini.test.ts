@@ -469,6 +469,22 @@ describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
     expect(run).toThrow("at schema.counts");
   });
 
+  it("keeps a text field whose description mentions propertyNames", () => {
+    // Arrange
+    const schema = {
+      type: "object",
+      properties: {
+        note: { type: "string", description: "Explain propertyNames" },
+      },
+    };
+
+    // Act
+    const run = () => sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(run).not.toThrow();
+  });
+
   it("keeps a tool with no parameters", () => {
     // Act
     const out = sanitizeJsonSchemaForGemini({ type: "object", properties: {} });
