@@ -58,7 +58,7 @@ describe("decideRoute for a private caller", () => {
     expect(d.tiers).toEqual(["workers-ai"]);
   });
 
-  it("returns no tier for a private request pinned to gemini", () => {
+  it("honors a private request pinned to gemini", () => {
     // Arrange
     const req = baseReq({ metadata: { fortune_route: "gemini" } } as never);
 
@@ -66,7 +66,29 @@ describe("decideRoute for a private caller", () => {
     const d = decideRoute(req, { privateConsumer: true });
 
     // Assert
-    expect(d.tiers).toEqual([]);
+    expect(d.tiers).toEqual(["gemini"]);
+  });
+
+  it("still filters a private request with an unknown route", () => {
+    // Arrange
+    const req = baseReq({ metadata: { fortune_route: "gemnii" } } as never);
+
+    // Act
+    const d = decideRoute(req, { privateConsumer: true });
+
+    // Assert
+    expect(d.tiers).not.toContain("gemini");
+  });
+
+  it("still filters a private request that asks for the free chain", () => {
+    // Arrange
+    const req = baseReq({ metadata: { fortune_route: "free" } } as never);
+
+    // Act
+    const d = decideRoute(req, { privateConsumer: true });
+
+    // Assert
+    expect(d.tiers).toEqual(["groq", "cerebras", "workers-ai"]);
   });
 });
 

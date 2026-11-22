@@ -72,8 +72,9 @@ export interface DecideRouteOptions {
    */
   anthropicFallback?: boolean;
   /**
-   * The caller's prompts must never reach a tier whose free terms let the
-   * provider keep them or learn from them (Knox's health letters).
+   * The gateway never picks, for this caller, a tier whose free terms let
+   * the provider keep or learn from prompts (Knox's health letters). A tier
+   * the caller pins in metadata.fortune_route is still honored.
    */
   privateConsumer?: boolean;
 }
@@ -98,12 +99,22 @@ export function decideRoute(
   options: DecideRouteOptions = {},
 ): RouteChain {
   const chain = chooseChain(req, options);
-  if (!options.privateConsumer) return chain;
+  // The filter guards the chain the gateway picks. A tier the caller pins in
+  // metadata.fortune_route is its own deliberate choice (Knox pins Gemini
+  // as its backup reader while Groq is out, Fortune's call on 2026-11-21).
+  if (!options.privateConsumer || isPinned(req, chain)) return chain;
   return {
     tiers: chain.tiers.filter((t) => !MAY_KEEP_PROMPTS.has(t)),
     reason: `${chain.reason}; private caller, tiers that may keep prompts left out`,
   };
 }
+
+/** The caller named exactly the one tier the chain holds. */
+const isPinned = (req: AnthropicMessagesRequest, chain: RouteChain): boolean => {
+  const route = (req.metadata as { fortune_route?: string } | undefined)
+    ?.fortune_route;
+  return chain.tiers.length === 1 && chain.tiers[0] === route;
+};
 
 function chooseChain(
   req: AnthropicMessagesRequest,
