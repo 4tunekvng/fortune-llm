@@ -244,9 +244,121 @@ describe("runChain through the fetch handler", () => {
 
     // Assert
     expect(resp.status).toBe(503);
-    const body = (await resp.json()) as { error: { type: string; message: string } };
+    const body = (await resp.json()) as {
+      error: { type: string; message: string; detail: string };
+    };
     expect(body.error.type).toBe("all_backends_failed");
-    expect(body.error.message).toContain("groq");
-    expect(body.error.message).toContain("workers-ai");
+    expect(body.error.detail).toContain("groq (Groq 500)");
+    expect(body.error.detail).toContain("workers-ai (workers ai down)");
+  });
+
+  it("says plainly that the models are busy, and not to retry at once", async () => {
+    // Arrange
+    groqFails(500, "boom");
+    const env = makeEnv(new MapKv(), {
+      AI: {
+        run: async () => {
+          throw new Error("workers ai down");
+        },
+      },
+    });
+
+    // Act
+    const resp = await worker.fetch(messagesRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(503);
+    expect(resp.headers.get("x-should-retry")).toBe("false");
+    expect(resp.headers.get("retry-after")).toBe("60");
+    expect(await resp.json()).toMatchObject({
+      error: {
+        message:
+          "Every free model is busy or out right now. Try again in a few minutes.",
+        retry_after_s: 60,
+      },
+    });
+  });
+
+  it("keeps each open tier's reopen time and waits for the soonest", async () => {
+    // Arrange: every free tier's circuit is open; the soonest in 10 minutes.
+    const kv = new MapKv();
+    await tripCircuit("groq", kv as never, 10 * 60_000, "Groq 429: per day");
+    await tripCircuit("workers-ai", kv as never, 30 * 60_000, "neurons exhausted");
+    const env = makeEnv(kv, { GROQ_API_KEY: undefined });
+    const req = messagesRequest({ metadata: { fortune_route: "groq" } });
+
+    // Act
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(503);
+    const body = (await resp.json()) as {
+      error: { type: string; detail: string; retry_after_s: number };
+    };
+    expect(body.error.type).toBe("quota_exhausted");
+    expect(body.error.detail).toMatch(/groq \(open until \d{4}-\d{2}-\d{2}T/);
+    expect(body.error.retry_after_s).toBeGreaterThan(590);
+    expect(body.error.retry_after_s).toBeLessThanOrEqual(600);
+  });
+
+  it("names the paid cap's end instead of passing its 400 through", async () => {
+    // Arrange: every free tier fails, then paid answers with its cap 400.
+    const capped = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message:
+          "You have reached your specified API usage limits. You will regain " +
+          "access on 2026-12-01 at 00:00 UTC.",
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("https://api.anthropic.com")
+          ? Response.json(capped, { status: 400 })
+          : Response.json({ error: { message: "boom" } }, { status: 500 }),
+      ),
+    );
+    const env = makeEnv(new MapKv(), {
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      AI: {
+        run: async () => {
+          throw new Error("workers ai down");
+        },
+      },
+    });
+
+    // Act
+    const resp = await worker.fetch(messagesRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(503);
+    expect(await resp.json()).toMatchObject({
+      error: {
+        type: "all_backends_failed",
+        paid_capped_until: "2026-12-01T00:00:00Z",
+      },
+    });
+  });
+
+  it("still passes on a paid 400 that is the caller's own mistake", async () => {
+    // Arrange
+    const bad = {
+      type: "error",
+      error: { type: "invalid_request_error", message: "max_tokens: too large" },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(bad, { status: 400 })),
+    );
+    const env = makeEnv(new MapKv(), { ANTHROPIC_API_KEY: "sk-ant-test" });
+    const req = messagesRequest({ metadata: { fortune_route: "anthropic" } });
+
+    // Act
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(400);
   });
 });

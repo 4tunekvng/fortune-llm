@@ -9,10 +9,11 @@ last-resort tier appended automatically when the worker has an
                 ┌──────────────────────────────────────────────────────────────────────────┐
 POST /v1/messages   decideRoute(body, { anthropicFallback })                                │
                 ├──────────────────────────────────────────────────────────────────────────┤
-                │ default / tools[]     →  [groq, workers-ai, gemini, openrouter,*anthropic]│
+                │ default / tools[]     →  [gemini, groq, cerebras, mistral, github-models,│
+                │                           openrouter, workers-ai, *anthropic] fastest first│
                 │ image content         →  [gemini, openrouter, *anthropic]                 │
                 │ very long context     →  [gemini, openrouter, workers-ai, *anthropic]     │
-                │ output_config (JSON)  →  [anthropic]   (free tiers can't speak it)        │
+                │ output_config (JSON)  →  same chains; a reply off the schema falls through│
                 │                                                                            │
                 │ metadata.fortune_route="anthropic"  →  [anthropic]   (force paid)         │
                 │ metadata.fortune_route="free"       →  free chain only (no paid fallback) │
@@ -91,6 +92,52 @@ x-fortune-llm-cache-age-s:           seconds since the cached entry was written 
 x-fortune-llm-rate-limit:            count/limit (only on 429 responses)
 ```
 
+## Structured output
+
+A request with `output_config.format.type = "json_schema"` (what the SDK's
+`messages.parse` sends) goes through the same free chain as any other
+request, with paid Anthropic last when configured; it is not sent to paid
+Anthropic only. Each free tier gets the schema in its own form
+(`response_format` for the OpenAI-style tiers, `responseSchema` for Gemini).
+Every text block of a free tier's reply must parse as JSON and match the
+schema (`src/schema-check.ts`); a reply that doesn't, including one cut off
+by `max_tokens`, counts as that tier failing and the chain moves on, so the
+caller never waits for a reply its own parser will throw away. Length and
+range limits are not checked: the SDK sends those as description hints and
+re-checks them itself.
+## Time limits
+
+A free tier that hangs can't hold a request: each free tier call runs under
+a time limit and is cancelled (its `fetch`, or Workers AI's `AI.run`, gets an
+abort signal) when the limit runs out, and the chain moves to the next tier.
+
+| Limit | Default | Notes |
+|---|---|---|
+| Own limit, fast tiers (groq, cerebras, mistral, github-models, gemini) | 10 s + 5 ms per `max_tokens` | On 2026-11-21 gemini's short replies took about 1 s and its slowest, a 3.5K-token curriculum, 6.8 s (about 600 tokens a second). 10 s is ten times the short replies and 5 ms a token a third of the measured speed, so a long reply is never cut for being long while a hung call gives way. Override with `TIER_TIME_LIMIT_MS_<TIER>`, e.g. `TIER_TIME_LIMIT_MS_GEMINI`. A timeout never shuts the tier for other requests. |
+| Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s and 64 s; only the chain budget bounds them. |
+| Chain budget, all free tiers together | the caller's timeout less 2 s, else 80 s | The SDK sends each call's timeout in `X-Stainless-Timeout`; the budget ends 2 s before it, so the caller gets an answer before it gives up, and a caller that chose to wait longer (Maestro's 100 s plan call) is not cut short. Without the header, `CHAIN_TIME_LIMIT_MS` (default 80 s). Tiers left when it is spent are not tried. |
+| Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
+
+For a stream the limit covers the wait for the response to start; once it
+has started it is never cut. A prompt over 100K tokens gets no own tier limit (the speeds
+were measured on prompts under 10K tokens); only the chain budget bounds it.
+
+## Private callers
+
+`PRIVATE_CONSUMERS` (a comma list in `wrangler.toml`, `knox` today) names
+callers, by their `x-fortune-consumer` header, whose prompts the gateway
+never sends on its own to a free tier whose provider may keep or learn from
+them: gemini, openrouter, mistral and github-models. Those tiers are left out
+of every chain the gateway picks for them (text, tools, images, long context).
+A private request that pins one tier in `metadata.fortune_route` gets that
+tier: the caller chose it in its own code. Knox pins gemini as its backup
+reader while groq is out (Fortune's call, 2026-11-21). Knox sends people's health insurance letters. Claiming a
+name only makes the claimant's own routing more private, so the header needs
+no proof here. A private caller's free chain is groq, cerebras and
+workers-ai; the other apps go to gemini before groq, which leaves groq's
+shared daily tokens for the callers that can't use gemini. While groq is
+out, a private caller's replies are as slow as Workers AI.
+
 ## Response cache
 
 Exact-match KV cache keyed on the request hash. A second identical
@@ -119,8 +166,33 @@ every other consumer.
 |---|---|---|
 | Limit | 200 req/min per IP | Override via `RATE_LIMIT_PER_MIN` in `[vars]`. Set 0 to disable. |
 | Identification | `cf-connecting-ip` → `x-forwarded-for` first hop → `"unknown"` | Cloudflare always sets `cf-connecting-ip` for non-CF clients. |
+| Per-app bucket | `x-fortune-consumer: <name>`, only for a name registered with `RATE_LIMIT_PER_MIN_<NAME>` in `[vars]` (knox, data-science-agent) and only with the production token | The header is a claim, not proof. An unregistered name, or any name sent with the development token, stays in the caller's IP bucket, so a caller can't mint fresh buckets or borrow an app's. A holder of the production token can still name a registered app; the provider quotas behind every tier are shared by all callers either way. |
 | Response on cap | `429 {"type":"rate_limit_error","message":…}` with `Retry-After` header | Standard back-off semantics. |
 | Failure mode | Fails open on KV unavailability | Better to miss a limit than block all traffic on infra trouble. |
+
+## When every tier fails
+
+The answer is `503` with a body apps can show as is:
+
+```json
+{"type":"error","error":{
+  "type":"quota_exhausted",
+  "message":"Every free model is busy or out right now. Try again in a few minutes.",
+  "detail":"all backends unavailable in chain [groq,gemini,...]: groq (open until 2026-11-21T21:18:35.341Z), gemini (Gemini 503), ...",
+  "retry_after_s":600,
+  "paid_capped_until":"2026-12-01T00:00:00Z"}}
+```
+
+- `type` is `quota_exhausted` when at least one tier's circuit was open,
+  else `all_backends_failed` (unchanged; local-routines match both).
+- `retry-after` and `retry_after_s`: seconds until the soonest open circuit
+  closes, at least 60.
+- `x-should-retry: false` stops the Anthropic SDKs from retrying at once a
+  chain that just failed end to end (they retry any 5xx twice by default).
+- `paid_capped_until` appears when paid Anthropic answered that its spend
+  cap is reached; that 400 is a failed tier, not passed through as the
+  caller's own bad request. Any other paid 400 is still passed through.
+- `detail` names each tier with only its leading `<Label> <status>`.
 
 ## Endpoints
 
@@ -194,7 +266,7 @@ that tier entirely.
 | Default open duration | 1 hour. Override via `[vars] CIRCUIT_TRIP_DURATION_MS = "1800000"` (30 min). Capped at 24h. |
 | Anthropic tier | Never circuit-gated — it's explicitly opt-in and paid, the user asked for it. |
 | KV unbound | Breaker no-ops with a one-time warning; behavior reverts to the old retry-every-time chain. |
-| Response when all tiers skipped | `503` with `{"type":"error","error":{"type":"quota_exhausted","message":"all backends unavailable: workers-ai (open until <ISO>), gemini (open until <ISO>)"}}` |
+| Response when all tiers skipped | `503` `quota_exhausted`, the busy answer below |
 | Diagnostic header | `x-fortune-llm-skipped: workers-ai:<ISO>,gemini:<ISO>` on every response where a tier was skipped |
 
 One-time setup (also shown in [Deploy](#deploy) above):
@@ -204,6 +276,23 @@ npx wrangler kv namespace create CIRCUIT
 npx wrangler kv namespace create CIRCUIT --preview
 # paste the printed ids into wrangler.toml
 ```
+
+## Latency replay
+
+`npm run replay` sends one request shaped like each app's (a Leggo chat
+turn, a Maestro curriculum, a Thesis letter read with a schema, a Tellar room
+question) to the live gateway and prints p50, p95 and success per app and per
+tier. Prompts are synthetic text of each app's size; tools, schemas,
+`max_tokens` and metadata copy what each app sends. Needs `GATEWAY_TOKEN` in
+the environment. Every run spends real free-tier quota.
+
+```
+GATEWAY_TOKEN=... npm run replay -- --mode chain --runs 10
+GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
+```
+
+`chain` replays each app the way it calls today, held to free tiers;
+`pinned` pins each app to each tier to size the per-tier time limits.
 
 ## Limitations
 

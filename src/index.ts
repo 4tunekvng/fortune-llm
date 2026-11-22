@@ -17,7 +17,13 @@ import type {
   AnthropicMessagesRequest,
 } from "./types.js";
 import { authenticate } from "./auth.js";
-import { decideRoute, type BackendKind, type RouteChain } from "./route.js";
+import {
+  decideRoute,
+  estimateInputTokens,
+  LONG_CONTEXT_THRESHOLD,
+  type BackendKind,
+  type RouteChain,
+} from "./route.js";
 import { forwardToAnthropic } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import {
@@ -54,8 +60,19 @@ import {
   writeCache,
 } from "./cache.js";
 import { synthesizeAnthropicSSE } from "./sse.js";
+import { extractOutputSchema } from "./structured-output.js";
+import { schemaMismatch } from "./schema-check.js";
+import { RequestShapeError } from "./upstream-error.js";
 import { resolveProviderKey, type ByokProvider } from "./byok.js";
-import type { StatsEvent } from "./stats-do.js";
+import {
+  callerDeadline,
+  chainBudgetMs,
+  paidHasTime,
+  tierLimitMs,
+  TierTimeoutError,
+  withTimeLimit,
+} from "./time-limit.js";
+import type { DailyStats, StatsEvent } from "./stats-do.js";
 import type { CachedResponse } from "./cache-do.js";
 // Re-export the DO classes so the Workers runtime can find them.
 export { StatsDO } from "./stats-do.js";
@@ -108,6 +125,14 @@ interface Env {
   CACHE_TTL_SECONDS?: string;
   /** Per-IP request cap per minute. Default 200. Set to 0 to disable. */
   RATE_LIMIT_PER_MIN?: string;
+  /** Time all free tiers of one request may take together. Default 80 s. */
+  CHAIN_TIME_LIMIT_MS?: string;
+  /**
+   * Comma-separated `x-fortune-consumer` names whose prompts the gateway
+   * never routes on its own to a tier that may keep them (route.ts
+   * MAY_KEEP_PROMPTS); a tier the caller pins is still honored.
+   */
+  PRIVATE_CONSUMERS?: string;
   /**
    * Durable Object that owns the stats counters. Atomic increments via
    * SQL UPSERT inside the DO actor — no lost updates, no read lag.
@@ -126,30 +151,7 @@ interface Env {
 
 type StatsDOStub = {
   recordEvents(e: StatsEvent[], consumer: string | null): Promise<void>;
-  getStats(): Promise<{
-    date: string;
-    totals: {
-      requests: number;
-      cache_hits: number;
-      cache_misses: number;
-      rate_limited: number;
-      errors: number;
-    };
-    per_tier: Record<string, { ok: number; fail: number }>;
-    per_consumer: Record<
-      string,
-      {
-        totals: {
-          requests: number;
-          cache_hits: number;
-          cache_misses: number;
-          rate_limited: number;
-          errors: number;
-        };
-        per_tier: Record<string, { ok: number; fail: number }>;
-      }
-    >;
-  }>;
+  getStats(): Promise<DailyStats>;
 };
 
 type CacheDOStub = {
@@ -158,6 +160,66 @@ type CacheDOStub = {
 };
 
 let circuitMissingWarned = false;
+
+function statsStub(env: Env): StatsDOStub | null {
+  return env.STATS_DO
+    ? (env.STATS_DO.get(
+        env.STATS_DO.idFromName("stats-singleton"),
+      ) as unknown as StatsDOStub)
+    : null;
+}
+
+function cacheStub(env: Env): CacheDOStub | null {
+  return env.CACHE_DO
+    ? (env.CACHE_DO.get(
+        env.CACHE_DO.idFromName("cache-singleton"),
+      ) as unknown as CacheDOStub)
+    : null;
+}
+
+/**
+ * Stats events accumulate over the lifetime of a request and are flushed
+ * to the StatsDO via ctx.waitUntil so the write doesn't add latency to the
+ * response path. The DO serializes increments through a single actor — no
+ * read-modify-write races, no KV cache lag. The consumer header is captured
+ * once at request entry so every event lands in the same per-consumer
+ * bucket even if the header is removed or rewritten mid-flow.
+ */
+function statsFlusher(
+  env: Env,
+  ctx: ExecutionContext,
+  consumerHeader: string | null,
+  statsEvents: StatsEvent[],
+): () => void {
+  return () => {
+    if (statsEvents.length === 0) return;
+    const stub = statsStub(env);
+    if (stub) {
+      const batch = statsEvents.slice();
+      ctx.waitUntil(stub.recordEvents(batch, consumerHeader));
+    }
+    statsEvents.length = 0;
+  };
+}
+
+/**
+ * The /stats label for a request: the consumer header, marked `dev-` for
+ * the development token so local runs and evals never count as the
+ * production app they name.
+ */
+function statsConsumer(request: Request, dev: boolean): string | null {
+  const name = request.headers.get("x-fortune-consumer");
+  return name && dev ? `dev-${name}`.slice(0, 32) : name;
+}
+
+function warnIfCircuitMissing(env: Env): void {
+  if (env.CIRCUIT || circuitMissingWarned) return;
+  circuitMissingWarned = true;
+  console.warn(
+    "fortune-llm: CIRCUIT KV namespace not bound — circuit breaker disabled. " +
+      "Run `wrangler kv namespace create CIRCUIT` and add the id to wrangler.toml.",
+  );
+}
 
 // ── Route handlers ───────────────────────────────────────────────────────────
 
@@ -174,11 +236,7 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
       statsAuth.message,
     );
   }
-  const stub = env.STATS_DO
-    ? (env.STATS_DO.get(
-        env.STATS_DO.idFromName("stats-singleton"),
-      ) as unknown as StatsDOStub)
-    : null;
+  const stub = statsStub(env);
   if (!stub) {
     return new Response(
       JSON.stringify({ error: "STATS_DO binding not configured" }),
@@ -271,19 +329,17 @@ function handleHealthz(env: Env): Response {
 async function applyRateLimit(
   request: Request,
   env: Env,
+  dev: boolean,
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Promise<Response | null> {
   const globalRateLimit = resolveRateLimitPerMin(env.RATE_LIMIT_PER_MIN);
   if (globalRateLimit === 0) return null;
-  const { scope, kind } = getRateLimitScope(request);
+  const envBag = env as unknown as Record<string, string | undefined>;
+  const { scope, kind } = getRateLimitScope(request, envBag, dev);
   const effectiveLimit =
     kind === "consumer"
-      ? resolveConsumerRateLimit(
-          scope,
-          globalRateLimit,
-          env as unknown as Record<string, string | undefined>,
-        )
+      ? resolveConsumerRateLimit(scope, globalRateLimit, envBag)
       : globalRateLimit;
   const decision = await checkRateLimit(scope, effectiveLimit, env.CIRCUIT);
   if (decision.allowed) return null;
@@ -372,11 +428,16 @@ function validateMessages(
   // Routing and every translator read `m.content` and `block.type`, so a
   // null entry would throw out of the handler instead of returning a 400.
   const isBlock = (b: unknown) => typeof b === "object" && b !== null;
+  // Translators read an image block's `source` directly.
+  const isContentBlock = (b: unknown) =>
+    isBlock(b) &&
+    ((b as { type?: unknown }).type !== "image" ||
+      isBlock((b as { source?: unknown }).source));
   const badMessage = parsed.messages.some(
     (m) =>
       !isBlock(m) ||
       (typeof m.content !== "string" &&
-        !(Array.isArray(m.content) && m.content.every(isBlock))),
+        !(Array.isArray(m.content) && m.content.every(isContentBlock))),
   );
   const badSystem =
     Array.isArray(parsed.system) && !parsed.system.every(isBlock);
@@ -385,6 +446,18 @@ function validateMessages(
       400,
       "invalid_request_error",
       "Each message needs string or array content of block objects.",
+    );
+  }
+  // Every tool translator maps over `tools`, so a bad shape would fail each
+  // tier and come back as a 503 instead of the caller's 400.
+  if (
+    parsed.tools !== undefined &&
+    !(Array.isArray(parsed.tools) && parsed.tools.every(isBlock))
+  ) {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      "Field 'tools' must be an array of tool objects.",
     );
   }
   if (
@@ -509,6 +582,11 @@ async function runChain(
 ): Promise<ChainResult> {
   const errors: Array<{ tier: BackendKind; error: string }> = [];
   const skipped: Array<{ tier: BackendKind; until: number }> = [];
+  const clientTimeout = request.headers.get("x-stainless-timeout");
+  const startedAt = Date.now();
+  const deadline = startedAt + chainBudgetMs(env.CHAIN_TIME_LIMIT_MS, clientTimeout);
+  const callerLeaves = callerDeadline(clientTimeout, startedAt);
+  const longContext = estimateInputTokens(effectiveParsed) > LONG_CONTEXT_THRESHOLD;
 
   for (let i = 0; i < chain.tiers.length; i++) {
     const tier = chain.tiers[i];
@@ -525,15 +603,32 @@ async function runChain(
       }
     }
 
+    const left = deadline - Date.now();
+    if (tier !== "anthropic" && left <= 0) {
+      errors.push({ tier, error: `${tier} not tried: time budget spent` });
+      continue;
+    }
+    if (tier === "anthropic" && !paidHasTime(callerLeaves, Date.now())) {
+      errors.push({ tier, error: "anthropic not tried: caller about to give up" });
+      continue;
+    }
+
     try {
-      const resp = await invokeTier(
+      const resp = await invokeTimed(
         tier,
+        left,
+        longContext,
         env,
         effectiveParsed,
         request,
         rawBody,
       );
-      if (tier !== "anthropic") await rejectEmptyReply(tier, resp);
+      if (tier === "anthropic") {
+        await rejectCappedPaid(resp);
+      } else {
+        await rejectEmptyReply(tier, resp);
+        await rejectOffSchemaReply(tier, resp, effectiveParsed);
+      }
       const headers = routeHeaders(resp, tier, chain, errors, skipped);
 
       // Only cache 200 JSON responses — SSE responses (which only appear
@@ -584,6 +679,36 @@ async function runChain(
   }
 
   return { ok: false, errors, skipped };
+}
+
+/**
+ * One tier call under its time limit: the tier's own limit or what is left
+ * of the chain budget, whichever is shorter. Paid Anthropic is the last
+ * resort and runs without either.
+ */
+function invokeTimed(
+  tier: BackendKind,
+  left: number,
+  longContext: boolean,
+  env: Env,
+  parsed: AnthropicMessagesRequest,
+  request: Request,
+  rawBody: string,
+): Promise<Response> {
+  if (tier === "anthropic") return invokeTier(tier, env, parsed, request, rawBody);
+  const own = longContext
+    ? undefined
+    : tierLimitMs(
+        tier,
+        env as unknown as Record<string, unknown>,
+        parsed.max_tokens,
+      );
+  const ms = own !== undefined && own < left ? own : left;
+  return withTimeLimit(
+    (signal) => invokeTier(tier, env, parsed, request, rawBody, signal),
+    ms,
+    () => new TierTimeoutError(tier, ms),
+  );
 }
 
 // Copies the tier's headers and adds the gateway's routing diagnostics.
@@ -692,13 +817,45 @@ async function tripOnQuota(
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
-  const ms = tripMsFor(err, tripDurationMs);
+  // A timeout belongs to this one request (time-limit.ts), never the tier.
+  const ms = err instanceof TierTimeoutError ? 0 : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
 }
 
-// Builds the final 503 response after all chain tiers are exhausted.
-// Distinguishes pure quota (all skipped, no errors), mixed (some skipped
-// + some errored), and all-errored cases.
+/**
+ * Paid Anthropic answers 400 invalid_request_error "You have reached your
+ * specified API usage limits. You will regain access on 2026-12-01 at 00:00
+ * UTC." when its spend cap is hit. Passed on, apps read that as their own
+ * bad request; as a failed tier it ends in the gateway's typed busy answer.
+ */
+async function rejectCappedPaid(resp: Response): Promise<void> {
+  if (resp.status !== 400) return;
+  let message = "";
+  try {
+    const body = (await resp.clone().json()) as { error?: { message?: string } };
+    message = body.error?.message ?? "";
+  } catch {
+    return;
+  }
+  if (!/usage limits?/i.test(message)) return;
+  const until = /regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC/i.exec(
+    message,
+  );
+  const when = until ? `${until[1]}T${until[2]}:00Z` : "unknown";
+  throw new Error(`Anthropic 400 capped until ${when}`);
+}
+
+/** Shown to people by apps: plain, and true whatever the tiers say. */
+const BUSY_MESSAGE =
+  "Every free model is busy or out right now. Try again in a few minutes.";
+/** Shortest wait suggested in retry-after, in seconds. */
+const MIN_RETRY_AFTER_S = 60;
+
+// Builds the final 503 response after all chain tiers are exhausted. The
+// error types stay as before (local-routines match them, and read the
+// "open until <ISO>" times in `detail`); the message is plain, retry-after
+// says when the first tier reopens, and x-should-retry stops the SDKs
+// retrying a chain that just failed end to end.
 function chainExhaustedResponse(
   errors: Array<{ tier: BackendKind; error: string }>,
   skipped: Array<{ tier: BackendKind; until: number }>,
@@ -706,67 +863,126 @@ function chainExhaustedResponse(
   statsEvents: StatsEvent[],
   flushStats: () => void,
 ): Response {
-  const headers: HeadersInit = {
+  statsEvents.push({ kind: "error" });
+  flushStats();
+  const soonest = Math.min(...skipped.map((s) => s.until));
+  const retryAfterS = Number.isFinite(soonest)
+    ? Math.max(MIN_RETRY_AFTER_S, Math.ceil((soonest - Date.now()) / 1000))
+    : MIN_RETRY_AFTER_S;
+  const headers: Record<string, string> = {
     "content-type": "application/json",
     "access-control-allow-origin": "*",
     "access-control-expose-headers": EXPOSE_HEADERS,
+    "retry-after": String(retryAfterS),
+    "x-should-retry": "false",
   };
   if (skipped.length > 0) {
-    (headers as Record<string, string>)["x-fortune-llm-skipped"] =
-      formatSkippedHeader(skipped);
+    headers["x-fortune-llm-skipped"] = formatSkippedHeader(skipped);
   }
-  statsEvents.push({ kind: "error" });
-  flushStats();
-
-  if (skipped.length > 0 && errors.length === 0) {
-    // Every tier in the chain had its circuit open — pure quota state.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${skipped
-            .map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            )
-            .join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  if (skipped.length > 0) {
-    // Mixed: some tiers skipped (quota), some failed (other reasons).
-    // Still a 503 quota_exhausted because the dominant signal is that
-    // the backends are throttled — but include the failed-tier errors
-    // so debugging is possible.
-    return new Response(
-      JSON.stringify({
-        type: "error",
-        error: {
-          type: "quota_exhausted",
-          message: `all backends unavailable: ${[
-            ...skipped.map(
-              (s) =>
-                `${s.tier} (open until ${new Date(s.until).toISOString()})`,
-            ),
-            ...errors.map((e) => `${e.tier} (failed)`),
-          ].join(", ")}`,
-        },
-      }),
-      { status: 503, headers },
-    );
-  }
-
-  return jsonError(
-    503,
-    "all_backends_failed",
-    `All free backends in chain [${chain.tiers.join(",")}] failed: ${errors
-      .map((e) => e.tier)
-      .join(", ")}.`,
+  const capped = errors
+    .map((e) => /capped until (\S+)/.exec(e.error)?.[1])
+    .find((d) => d !== undefined);
+  const detail = [
+    ...skipped.map(
+      (s) => `${s.tier} (open until ${new Date(s.until).toISOString()})`,
+    ),
+    ...errors.map((e) => `${e.tier} (${errorLabel(e.error)})`),
+  ].join(", ");
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: skipped.length > 0 ? "quota_exhausted" : "all_backends_failed",
+        message: BUSY_MESSAGE,
+        detail:
+          `all backends unavailable in chain [${chain.tiers.join(",")}]: ` +
+          detail,
+        retry_after_s: retryAfterS,
+        ...(capped ? { paid_capped_until: capped } : {}),
+      },
+    }),
+    { status: 503, headers },
   );
+}
+
+/**
+ * Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
+ * specific and don't translate cleanly. Only forward when Anthropic is
+ * configured; otherwise reject so callers see the policy clearly.
+ */
+async function handleAnthropicOnly(
+  request: Request,
+  url: URL,
+  rawBody: string,
+  dev: boolean,
+  env: Env,
+): Promise<Response> {
+  if (dev) return devTokenPaidRefusal();
+  if (!env.ANTHROPIC_API_KEY) {
+    return jsonError(
+      501,
+      "not_implemented",
+      `Endpoint ${url.pathname} is Anthropic-only and ANTHROPIC_API_KEY` +
+        ` is not configured. Free backends only support /v1/messages.`,
+    );
+  }
+  try {
+    return withCors(
+      await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
+    );
+  } catch (err) {
+    console.error("fortune-llm: Anthropic upstream failed:", errorMessage(err));
+    return jsonError(
+      502,
+      "upstream_error",
+      "Anthropic upstream failed. Please try again.",
+    );
+  }
+}
+
+function parseMessagesBody(
+  rawBody: string,
+): AnthropicMessagesRequest | Response {
+  let parsed: AnthropicMessagesRequest;
+  try {
+    parsed = JSON.parse(rawBody) as AnthropicMessagesRequest;
+  } catch {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      "Body must be valid JSON.",
+    );
+  }
+  return validateMessages(parsed) ?? parsed;
+}
+
+/** Routes served before /v1/ auth: stats, health, preflight and 404. */
+function routeOutsideApi(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> | Response | null {
+  // GET /stats — auth-protected observability (strongly consistent via DO).
+  if (request.method === "GET" && url.pathname === "/stats") {
+    return handleStats(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/healthz") {
+    return handleHealthz(env);
+  }
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+
+  if (!url.pathname.startsWith("/v1/")) {
+    return jsonError(
+      404,
+      "not_found",
+      `No route for ${request.method} ${url.pathname}`,
+    );
+  }
+  return null;
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
@@ -778,58 +994,25 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    // Stats events accumulate over the lifetime of this request and
-    // are flushed to the StatsDO via ctx.waitUntil so the write doesn't
-    // add latency to the response path. The DO serializes increments
-    // through a single actor — no read-modify-write races, no KV cache lag.
-    const statsEvents: StatsEvent[] = [];
-    // Consumer identity: captured once at request entry so every stats
-    // event lands in the same per-consumer bucket even if the header is
-    // removed or rewritten mid-flow.
-    const consumerHeader = request.headers.get("x-fortune-consumer");
-    const flushStats = () => {
-      if (statsEvents.length === 0) return;
-      const stub = env.STATS_DO
-        ? (env.STATS_DO.get(
-            env.STATS_DO.idFromName("stats-singleton"),
-          ) as unknown as StatsDOStub)
-        : null;
-      if (stub) {
-        const batch = statsEvents.slice();
-        ctx.waitUntil(stub.recordEvents(batch, consumerHeader));
-      }
-      statsEvents.length = 0;
-    };
-
-    // GET /stats — auth-protected observability (strongly consistent via DO).
-    if (request.method === "GET" && url.pathname === "/stats") {
-      return handleStats(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/healthz") {
-      return handleHealthz(env);
-    }
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-
-    if (!url.pathname.startsWith("/v1/")) {
-      return jsonError(
-        404,
-        "not_found",
-        `No route for ${request.method} ${url.pathname}`,
-      );
-    }
+    const nonApi = routeOutsideApi(request, url, env);
+    if (nonApi) return nonApi;
 
     const auth = authenticate(request, env.GATEWAY_TOKEN, env.GATEWAY_DEV_TOKEN);
     if (!auth.ok) {
       return jsonError(auth.status, "authentication_error", auth.message);
     }
 
+    const statsEvents: StatsEvent[] = [];
+    const flushStats = statsFlusher(
+      env,
+      ctx,
+      statsConsumer(request, auth.dev),
+      statsEvents,
+    );
     const rateLimitResp = await applyRateLimit(
       request,
       env,
+      auth.dev,
       statsEvents,
       flushStats,
     );
@@ -839,45 +1022,12 @@ export default {
     if (bodyResult instanceof Response) return bodyResult;
     const { rawBody } = bodyResult;
 
-    // Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
-    // specific and don't translate cleanly. Only forward when Anthropic
-    // is configured; otherwise reject so callers see the policy clearly.
     if (!(request.method === "POST" && url.pathname === "/v1/messages")) {
-      if (auth.dev) return devTokenPaidRefusal();
-      if (!env.ANTHROPIC_API_KEY) {
-        return jsonError(
-          501,
-          "not_implemented",
-          `Endpoint ${url.pathname} is Anthropic-only and ANTHROPIC_API_KEY` +
-            ` is not configured. Free backends only support /v1/messages.`,
-        );
-      }
-      try {
-        return withCors(
-          await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
-        );
-      } catch (err) {
-        console.error("fortune-llm: Anthropic upstream failed:", errorMessage(err));
-        return jsonError(
-          502,
-          "upstream_error",
-          "Anthropic upstream failed. Please try again.",
-        );
-      }
+      return handleAnthropicOnly(request, url, rawBody, auth.dev, env);
     }
 
-    let parsed: AnthropicMessagesRequest;
-    try {
-      parsed = JSON.parse(rawBody) as AnthropicMessagesRequest;
-    } catch {
-      return jsonError(
-        400,
-        "invalid_request_error",
-        "Body must be valid JSON.",
-      );
-    }
-    const validationErr = validateMessages(parsed);
-    if (validationErr) return validationErr;
+    const parsed = parseMessagesBody(rawBody);
+    if (parsed instanceof Response) return parsed;
     const route = (parsed.metadata as { fortune_route?: string } | undefined)
       ?.fortune_route;
     if (auth.dev && route === "anthropic") return devTokenPaidRefusal();
@@ -899,17 +1049,13 @@ export default {
     // Cache lives in a DO actor — reads/writes are strongly consistent
     // so rapid-fire identical requests hit cache immediately. Fall back to
     // KV cache when CACHE_DO isn't present (local dev without the migration).
-    const cacheStub: CacheDOStub | null = env.CACHE_DO
-      ? (env.CACHE_DO.get(
-          env.CACHE_DO.idFromName("cache-singleton"),
-        ) as unknown as CacheDOStub)
-      : null;
+    const cacheDo = cacheStub(env);
     let cacheKey: string | null = null;
     if (cacheEligible) {
       cacheKey = await computeCacheKey(parsed);
       const hit = await lookupAndServeCache(
         cacheKey,
-        cacheStub,
+        cacheDo,
         env.CIRCUIT,
         wantsStream,
         statsEvents,
@@ -928,15 +1074,10 @@ export default {
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
+      privateConsumer: isPrivateConsumer(request, env.PRIVATE_CONSUMERS),
     });
 
-    if (!env.CIRCUIT && !circuitMissingWarned) {
-      circuitMissingWarned = true;
-      console.warn(
-        "fortune-llm: CIRCUIT KV namespace not bound — circuit breaker disabled. " +
-          "Run `wrangler kv namespace create CIRCUIT` and add the id to wrangler.toml.",
-      );
-    }
+    warnIfCircuitMissing(env);
     const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
 
     const result = await runChain(
@@ -948,7 +1089,7 @@ export default {
       cacheEligible,
       cacheKey,
       wantsStream,
-      cacheStub,
+      cacheDo,
       cacheTtl,
       tripDurationMs,
       statsEvents,
@@ -1001,7 +1142,7 @@ const SINGLE_MODEL_TIERS = {
       keyName: keyof Env;
       model: (env: Env) => string;
       call: (
-        opts: { apiKey: string; model: string },
+        opts: { apiKey: string; model: string; signal?: AbortSignal },
         req: AnthropicMessagesRequest,
       ) => Promise<Response>;
     }
@@ -1055,16 +1196,78 @@ async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void
   if (!said) throw new Error(`${tier} returned an empty reply`);
 }
 
+/**
+ * A structured request (`output_config` json_schema) is answered by a JSON
+ * object in every text block, which the SDK's `messages.parse` parses and
+ * checks (a reply with only a tool call has no text to check). A free model that returns something else (prose, cut-off JSON,
+ * an enum value outside the list) would fail there after the whole wait, so
+ * throwing here moves the chain to the next tier instead. Streams are left
+ * alone, as in rejectEmptyReply.
+ */
+async function rejectOffSchemaReply(
+  tier: BackendKind,
+  resp: Response,
+  req: AnthropicMessagesRequest,
+): Promise<void> {
+  const format = extractOutputSchema(req);
+  const type = resp.headers.get("content-type") ?? "";
+  if (!format || resp.status !== 200 || !type.includes("application/json")) return;
+  let msg: AnthropicMessageResponse;
+  try {
+    msg = (await resp.clone().json()) as AnthropicMessageResponse;
+  } catch {
+    return;
+  }
+  const texts = (Array.isArray(msg.content) ? msg.content : []).flatMap((b) =>
+    b.type === "text" ? [b.text] : [],
+  );
+  // No text block (a tool call only) leaves the SDK's parsed_output null
+  // without an error, so only text the SDK will parse is checked.
+  const problem = firstSchemaProblem(texts, format.schema);
+  if (problem) {
+    throw new RequestShapeError(
+      `${tier} reply off schema: ${problem} (stop_reason ${msg.stop_reason})`,
+    );
+  }
+}
+
+function firstSchemaProblem(
+  texts: string[],
+  schema: Record<string, unknown>,
+): string | null {
+  for (const text of texts) {
+    let value: unknown;
+    try {
+      value = JSON.parse(unfenced(text));
+    } catch {
+      return "it is not JSON";
+    }
+    const miss = schemaMismatch(value, schema);
+    if (miss) return miss;
+  }
+  return null;
+}
+
+/**
+ * JSON wrapped in a Markdown code fence. Apps that read the reply leniently
+ * (Knox strips fences) accept it, so it is checked rather than refused.
+ */
+function unfenced(text: string): string {
+  const m = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
+  return m ? (m[1] as string) : text;
+}
+
 async function invokeTier(
   tier: BackendKind,
   env: Env,
   parsed: AnthropicMessagesRequest,
   request: Request,
   rawBody: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (tier === "workers-ai") {
     const model = env.DEFAULT_OSS_MODEL ?? "@cf/google/gemma-4-26b-a4b-it";
-    const resp = await callWorkersAi(env.AI, model, parsed);
+    const resp = await callWorkersAi(env.AI, model, parsed, signal);
     return withTierHeaders(resp, { "x-fortune-llm-model": model });
   }
   // BYOK: every non-workers-ai tier supports per-request key override via
@@ -1091,6 +1294,7 @@ async function invokeTier(
       models,
       parsed,
       isKeyError,
+      signal,
     );
     return withTierHeaders(
       resp,
@@ -1108,7 +1312,7 @@ async function invokeTier(
     const resolved = resolveKey(tier, env[spec.keyName]);
     if (!resolved) throw new Error(`${spec.keyName} not configured`);
     const model = spec.model(env);
-    const resp = await spec.call({ apiKey: resolved.key, model }, parsed);
+    const resp = await spec.call({ apiKey: resolved.key, model, signal }, parsed);
     return withTierHeaders(
       resp,
       { "x-fortune-llm-model": model },
@@ -1120,7 +1324,7 @@ async function invokeTier(
     if (!resolved) throw new Error("OPENROUTER_API_KEY not configured");
     const models = resolveOpenRouterModels(env.DEFAULT_OPENROUTER_MODELS);
     const resp = await callOpenRouter(
-      { apiKey: resolved.key, models },
+      { apiKey: resolved.key, models, signal },
       parsed,
     );
     return withTierHeaders(
@@ -1163,9 +1367,14 @@ function formatPriorErrorsHeader(
   errors: Array<{ tier: BackendKind; error: string }>,
 ): string {
   return errors
-    .map((e) => `${e.tier}:${(e.error.split(":")[0] ?? "").slice(0, 80)}`)
+    .map((e) => `${e.tier}:${errorLabel(e.error)}`)
     .join(" | ")
     .replace(/[\x00-\x1f\x7f]+/g, " ");
+}
+
+/** The leading `<Label> <status>` part of a tier error, never the raw body. */
+function errorLabel(error: string): string {
+  return (error.split(":")[0] ?? "").slice(0, 80);
 }
 
 function formatSkippedHeader(
@@ -1174,6 +1383,20 @@ function formatSkippedHeader(
   return skipped
     .map((s) => `${s.tier}:${new Date(s.until).toISOString()}`)
     .join(",");
+}
+
+/**
+ * A caller listed in PRIVATE_CONSUMERS. The header is not proof of who is
+ * calling, but claiming a name only makes the claimant's own routing more
+ * private, so nothing is gained by spoofing it.
+ */
+function isPrivateConsumer(request: Request, list: string | undefined): boolean {
+  const name = request.headers.get("x-fortune-consumer")?.trim().toLowerCase();
+  if (!name || !list) return false;
+  return list
+    .split(",")
+    .map((n) => n.trim().toLowerCase())
+    .includes(name);
 }
 
 /** The development token is for free-tier runs only; paid Anthropic needs the main token. */

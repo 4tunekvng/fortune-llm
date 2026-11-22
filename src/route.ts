@@ -3,14 +3,11 @@
  * tries each tier in order until one succeeds.
  *
  * Default policy (free first, paid as last-resort):
- *   - plain text chat        →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
- *                                                     (seven independent free-quota pools
- *                                                      — exhausting all on the same day
- *                                                      is what makes the paid fallback rare)
- *   - has tools[]            →  [groq, cerebras, mistral, workers-ai, gemini, github-models, openrouter]
- *                                                     (groq llama-4-scout has the best free
- *                                                      tool-use; cerebras/mistral/workers-ai/gemini/
- *                                                      github-models/openrouter are independent fallbacks)
+ *   - plain text chat or tools[] →  [gemini, groq, cerebras, mistral,
+ *                                     github-models, openrouter, workers-ai]
+ *       (seven independent free-quota pools, fastest first; exhausting all
+ *       on the same day is what makes the paid fallback rare. A private
+ *       caller gets [groq, cerebras, workers-ai].)
  *   - image content present  →  [gemini, openrouter, workers-ai]
  *                                                     (gemini is best free vision; OpenRouter
  *                                                      Llama 4 is next; Gemma 4 26B on Workers AI
@@ -21,11 +18,10 @@
  *                                                     (gemini 2.5 flash has 1M+ context;
  *                                                      OpenRouter's free Llama 4 has 256k+;
  *                                                      workers-ai's gemma-4 caps lower)
- *   - has output_config      →  [anthropic]           (json_schema structured output is an
- *                                                      Anthropic-native SDK feature — free
- *                                                      backends don't understand the field
- *                                                      and return code-fenced JSON that the
- *                                                      SDK's text parser then chokes on)
+ *   - has output_config      →  the same chains       (each free tier gets the schema in
+ *                                                      its own form; a reply off the schema
+ *                                                      counts as a failure and falls through,
+ *                                                      see schema-check.ts)
  *
  * When `options.anthropicFallback === true` (i.e. ANTHROPIC_API_KEY is
  * configured on the worker), Anthropic is appended as the last-resort
@@ -75,13 +71,54 @@ export interface DecideRouteOptions {
    * been circuit-broken.
    */
   anthropicFallback?: boolean;
+  /**
+   * The gateway never picks, for this caller, a tier whose free terms let
+   * the provider keep or learn from prompts (Knox's health letters). A tier
+   * the caller pins in metadata.fortune_route is still honored.
+   */
+  privateConsumer?: boolean;
 }
 
-const LONG_CONTEXT_THRESHOLD = 100_000;
+/**
+ * Free tiers whose providers may keep what they are sent or learn from it:
+ * Gemini's unpaid tier, OpenRouter's `:free` model hosts, Mistral's free
+ * plan, and GitHub Models (prompts are logged for abuse monitoring). A
+ * private caller's chain leaves them out.
+ */
+const MAY_KEEP_PROMPTS: ReadonlySet<BackendKind> = new Set<BackendKind>([
+  "gemini",
+  "openrouter",
+  "mistral",
+  "github-models",
+]);
+
+export const LONG_CONTEXT_THRESHOLD = 100_000;
 
 export function decideRoute(
   req: AnthropicMessagesRequest,
   options: DecideRouteOptions = {},
+): RouteChain {
+  const chain = chooseChain(req, options);
+  // The filter guards the chain the gateway picks. A tier the caller pins in
+  // metadata.fortune_route is its own deliberate choice (Knox pins Gemini
+  // as its backup reader while Groq is out, Fortune's call on 2026-11-21).
+  if (!options.privateConsumer || isPinned(req, chain)) return chain;
+  return {
+    tiers: chain.tiers.filter((t) => !MAY_KEEP_PROMPTS.has(t)),
+    reason: `${chain.reason}; private caller, tiers that may keep prompts left out`,
+  };
+}
+
+/** The caller named exactly the one tier the chain holds. */
+const isPinned = (req: AnthropicMessagesRequest, chain: RouteChain): boolean => {
+  const route = (req.metadata as { fortune_route?: string } | undefined)
+    ?.fortune_route;
+  return chain.tiers.length === 1 && chain.tiers[0] === route;
+};
+
+function chooseChain(
+  req: AnthropicMessagesRequest,
+  options: DecideRouteOptions,
 ): RouteChain {
   const meta = req.metadata as { fortune_route?: string } | undefined;
 
@@ -173,23 +210,29 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   }
 
   // Default for both plain chat and tool-using calls. Stacks SEVEN
-  // independent free-quota pools in order:
-  //   groq           — fastest, native tool use, biggest free RPM
-  //   cerebras       — very fast (custom silicon), independent quota
-  //   mistral        — Mistral La Plateforme free experimental tier
-  //   workers-ai     — Cloudflare account-scoped neurons
-  //   gemini         — per-Google-API-key quota (multi-key rotation)
+  // independent free-quota pools, fastest first, so the slow pools are the
+  // reserve rather than the first stop (replays of 2026-11-21):
+  //   gemini         — 1-7 s; per-Google-API-key quota (multi-key rotation)
+  //   groq           — about 3 s, native tool use. Its 200K tokens a day are
+  //                    shared by every app and were spent by morning on
+  //                    2026-11-21, and it is the one fast tier a private
+  //                    caller may use, so apps that may use gemini go there
+  //                    first and leave groq for the ones that can't.
+  //   cerebras       — fast when it works; fails in under 1 s (402 today)
+  //   mistral        — free experimental tier; fails in under 1 s (429 today)
   //   github-models  — Azure-backed, free with any GitHub account
-  //   openrouter     — meta-router with multi-model fallback
-  // Seven independent quotas = "rarely hits anthropic" even at scale.
+  //   openrouter     — 2-60 s; meta-router with multi-model fallback
+  //   workers-ai     — 11-64 s and more; Cloudflare account-scoped neurons
+  // The pools are the same as before, so when gemini's quota runs out the
+  // chain lands where it used to; it is faster whenever gemini answers.
   return [
+    "gemini",
     "groq",
     "cerebras",
     "mistral",
-    "workers-ai",
-    "gemini",
     "github-models",
     "openrouter",
+    "workers-ai",
   ];
 }
 

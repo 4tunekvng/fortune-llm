@@ -58,6 +58,7 @@ export interface CallOpenRouterOptions {
   models: string[];
   /** Optional gateway origin for OpenRouter attribution headers. */
   referer?: string;
+  signal?: AbortSignal;
 }
 
 /**
@@ -103,6 +104,7 @@ export async function callOpenRouter(
         models: opts.models,
         provider: { sort: "throughput", allow_fallbacks: true },
       },
+      signal: opts.signal,
     },
     req,
   );

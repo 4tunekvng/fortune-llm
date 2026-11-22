@@ -248,6 +248,249 @@ describe("sanitizeJsonSchemaForGemini", () => {
     expect(props.bytes).toEqual({ type: "integer", minimum: 0, maximum: 1_000_000 });
     expect(props.files).toEqual({ type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 });
   });
+
+  it("turns the SDK's enum, const and nullable output into Gemini's form", () => {
+    // Arrange: verbatim zodOutputFormat output from @anthropic-ai/sdk 1.10.0 for
+    // z.object({ kind: z.enum(["a","b"]), tag: z.literal("x"),
+    //            n: z.number().nullable() }).
+    const schema = {
+      type: "object",
+      properties: {
+        kind: { enum: ["a", "b"] },
+        tag: { const: "x" },
+        n: { type: ["number", "null"] },
+      },
+      additionalProperties: false,
+      required: ["kind", "tag", "n"],
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out).toEqual({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["a", "b"] },
+        tag: { type: "string", enum: ["x"] },
+        n: { type: "number", nullable: true },
+      },
+      required: ["kind", "tag", "n"],
+    });
+  });
+});
+
+describe("sanitizeJsonSchemaForGemini type lists and maps", () => {
+  it("offers each type of a several-type list as an alternative", () => {
+    // Arrange
+    const schema = {
+      type: "object",
+      properties: { v: { type: ["string", "number", "null"] } },
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out.properties).toEqual({
+      v: { nullable: true, anyOf: [{ type: "string" }, { type: "number" }] },
+    });
+  });
+
+  it("refuses a free-form map in a tool and names the field", () => {
+    // Arrange: DSM's plan tool shape from issue #27.
+    const tools = [
+      {
+        name: "plan",
+        input_schema: {
+          type: "object",
+          properties: {
+            filters: {
+              type: "object",
+              additionalProperties: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+      },
+    ];
+
+    // Act
+    const translate = () => translateToolsToGemini(tools);
+
+    // Assert
+    expect(translate).toThrow(
+      "Gemini cannot take a free-form map (an object with no fixed keys) " +
+        "at tools.plan.filters",
+    );
+  });
+
+  it("refuses a request whose output schema holds a map, before any call", () => {
+    // Arrange
+    const req = baseReq({
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { counts: { type: "object", additionalProperties: true } },
+          },
+        },
+      },
+    } as Partial<AnthropicMessagesRequest>);
+
+    // Act
+    const build = () => buildGeminiInput(req);
+
+    // Assert
+    expect(build).toThrow("at schema.counts");
+  });
+
+  it("refuses a number const or a number enum, before any call", () => {
+    // Arrange
+    const literal = { type: "object", properties: { v: { const: 1 } } };
+    const numbers = {
+      type: "object",
+      properties: { n: { type: "integer", enum: [1, 2, 3] } },
+    };
+
+    // Act
+    const one = () => sanitizeJsonSchemaForGemini(literal);
+    const many = () => sanitizeJsonSchemaForGemini(numbers);
+
+    // Assert
+    expect(one).toThrow("Gemini cannot take a non-text enum or const at schema.v");
+    expect(many).toThrow("at schema.n");
+  });
+
+  it("never reads a refused field's name as a quota error", () => {
+    // Arrange: a tool whose name holds a quota word.
+    const tools = [
+      {
+        name: "set_quota",
+        input_schema: {
+          type: "object",
+          properties: { limits: { type: "object", additionalProperties: true } },
+        },
+      },
+    ];
+
+    // Act
+    let thrown: unknown;
+    try {
+      translateToolsToGemini(tools);
+    } catch (err) {
+      thrown = err;
+    }
+
+    // Assert
+    expect(String(thrown)).toContain("tools.set_quota.limits");
+    expect(isQuotaError(thrown)).toBe(false);
+  });
+
+  it("writes out the SDK's $ref to a nested object in place", () => {
+    // Arrange: verbatim zodOutputFormat output (SDK 1.12) for
+    // z.object({ e: z.array(z.object({ n: z.number().int().min(1) })).max(3) }).
+    const schema = {
+      $defs: {
+        __schema0: {
+          type: "object",
+          properties: { n: { type: "integer", description: "{minimum: 1}" } },
+          additionalProperties: false,
+          required: ["n"],
+        },
+      },
+      type: "object",
+      properties: {
+        e: {
+          type: "array",
+          items: { $ref: "#/$defs/__schema0" },
+          description: "{maxItems: 3}",
+        },
+      },
+      additionalProperties: false,
+      required: ["e"],
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect((out.properties as Record<string, unknown>).e).toEqual({
+      type: "array",
+      items: {
+        type: "object",
+        properties: { n: { type: "integer", description: "{minimum: 1}" } },
+        required: ["n"],
+      },
+      description: "{maxItems: 3}",
+    });
+  });
+
+  it("refuses a schema that refers back into itself", () => {
+    // Arrange: what z.lazy() makes of a tree.
+    const tree = {
+      $defs: {
+        node: {
+          type: "object",
+          properties: { kids: { type: "array", items: { $ref: "#/$defs/node" } } },
+        },
+      },
+      type: "object",
+      properties: { root: { $ref: "#/$defs/node" } },
+    };
+
+    // Act
+    const run = () => sanitizeJsonSchemaForGemini(tree);
+
+    // Assert
+    expect(run).toThrow(
+      "Gemini cannot take a recursive schema at schema.root.kids[]",
+    );
+  });
+
+  it("refuses the SDK's form of a z.record map", () => {
+    // Arrange: verbatim SDK 1.12 output for z.record(z.string(), z.number()).
+    const schema = {
+      type: "object",
+      properties: {
+        counts: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+          description: '{propertyNames: {"type":"string"}}',
+        },
+      },
+    };
+
+    // Act
+    const run = () => sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(run).toThrow("at schema.counts");
+  });
+
+  it("keeps a tool with no parameters", () => {
+    // Act
+    const out = sanitizeJsonSchemaForGemini({ type: "object", properties: {} });
+
+    // Assert
+    expect(out).toEqual({ type: "object", properties: {} });
+  });
+
+  it("keeps an object with fixed keys that also allows extra ones", () => {
+    // Arrange
+    const schema = {
+      type: "object",
+      properties: { a: { type: "string" } },
+      additionalProperties: true,
+    };
+
+    // Act
+    const out = sanitizeJsonSchemaForGemini(schema);
+
+    // Assert
+    expect(out).toEqual({ type: "object", properties: { a: { type: "string" } } });
+  });
 });
 
 describe("translateToolsToGemini", () => {
