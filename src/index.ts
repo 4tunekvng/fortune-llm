@@ -128,8 +128,9 @@ interface Env {
   /** Time all free tiers of one request may take together. Default 80 s. */
   CHAIN_TIME_LIMIT_MS?: string;
   /**
-   * Comma-separated `x-fortune-consumer` names whose prompts never go to a
-   * tier that may keep them (route.ts MAY_KEEP_PROMPTS).
+   * Comma-separated `x-fortune-consumer` names whose prompts the gateway
+   * never routes on its own to a tier that may keep them (route.ts
+   * MAY_KEEP_PROMPTS); a tier the caller pins is still honored.
    */
   PRIVATE_CONSUMERS?: string;
   /**
@@ -1075,14 +1076,6 @@ export default {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
       privateConsumer: isPrivateConsumer(request, env.PRIVATE_CONSUMERS),
     });
-    if (chain.tiers.length === 0) {
-      return jsonError(
-        400,
-        "invalid_request_error",
-        `This caller's prompts stay off tiers that may keep them, and ` +
-          `${route ?? "this request"} is one of them.`,
-      );
-    }
 
     warnIfCircuitMissing(env);
     const tripDurationMs = resolveTripDurationMs(env.CIRCUIT_TRIP_DURATION_MS);
