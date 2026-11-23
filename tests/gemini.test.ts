@@ -1063,6 +1063,31 @@ describe("callGeminiModels", () => {
     expect(String(fetchSpy.mock.calls[1][0])).toContain("gemini-2.5-flash-lite");
   });
 
+  it("fails the tier on a 503, never spending a scarcer model's quota", async () => {
+    // Arrange: the real 503 body from 2026-11-21, trimmed. Moving on to
+    // gemini-flash-latest (20 free calls a day) shut the tier for an hour.
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        '{"error":{"code":503,"message":"This model is currently experiencing ' +
+          'high demand.","status":"UNAVAILABLE"}}',
+        { status: 503 },
+      ),
+    );
+    fetchSpy.mockResolvedValueOnce(ok());
+
+    // Act
+    const call = callGeminiModels(
+      ["k1"],
+      ["gemini-flash-lite-latest", "gemini-flash-latest"],
+      baseReq(),
+      isQuotaError,
+    );
+
+    // Assert
+    await expect(call).rejects.toThrow(/Gemini 503/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the first model when it works", async () => {
     fetchSpy.mockResolvedValueOnce(ok());
     const { model } = await callGeminiModels(["k1"], ["gemini-2.5-flash", "gemini-2.5-flash-lite"], baseReq(), isQuotaError);
