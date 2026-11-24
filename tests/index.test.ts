@@ -549,6 +549,39 @@ describe("fetch handler with malformed message entries", () => {
   });
 });
 
+describe("fetch handler with a max_tokens over the gateway cap", () => {
+  it("lowers max_tokens to 65536 instead of refusing the request", async () => {
+    // Arrange: Claude Code asks for more output than the gateway allows.
+    const run = vi.fn(async () => ({ response: "hello from workers ai" }));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      AI: { run },
+    };
+    const request = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token" },
+      body: JSON.stringify({
+        model: "claude-opus-5-5",
+        max_tokens: 128000,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    // Act
+    const resp = await worker.fetch(request, env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(200);
+    expect(run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ max_tokens: 65536 }),
+      expect.anything(),
+    );
+  });
+});
+
 describe("fetch handler with the development token", () => {
   const env = {
     GATEWAY_TOKEN: "gateway-token",

@@ -24,7 +24,7 @@ import {
   type BackendKind,
   type RouteChain,
 } from "./route.js";
-import { forwardToAnthropic } from "./anthropic.js";
+import { forwardToAnthropic, MAX_OUTPUT_TOKENS } from "./anthropic.js";
 import { callWorkersAi } from "./workers-ai.js";
 import {
   callGeminiModels,
@@ -470,13 +470,6 @@ function validateMessages(
       400,
       "invalid_request_error",
       "Field 'max_tokens' must be a positive integer.",
-    );
-  }
-  if (parsed.max_tokens > 65536) {
-    return jsonError(
-      400,
-      "invalid_request_error",
-      "Field 'max_tokens' must not exceed 65536.",
     );
   }
   return null;
@@ -953,7 +946,10 @@ function parseMessagesBody(
       "Body must be valid JSON.",
     );
   }
-  return validateMessages(parsed) ?? parsed;
+  const invalid = validateMessages(parsed);
+  if (invalid) return invalid;
+  parsed.max_tokens = Math.min(parsed.max_tokens, MAX_OUTPUT_TOKENS);
+  return parsed;
 }
 
 /** Routes served before /v1/ auth: stats, health, preflight and 404. */

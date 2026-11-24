@@ -11,6 +11,11 @@
 
 const UPSTREAM = "https://api.anthropic.com";
 
+// The most output tokens any caller may ask for. A request over it is
+// lowered to it, not refused: current Claude Code asks for more than this, and
+// the cap exists only to stop a runaway bill (2147483647 was once accepted).
+export const MAX_OUTPUT_TOKENS = 65536;
+
 // Metadata keys the gateway reserves for its own routing. Stripped from
 // the request body before it goes upstream so Anthropic doesn't reject
 // them as "Extra inputs are not permitted".
@@ -78,6 +83,20 @@ export function scrubForAnthropic(rawBody: string): string {
     const parsed = JSON.parse(rawBody);
     if (!parsed || typeof parsed !== "object") return rawBody;
     let touched = false;
+    // This hop forwards the raw body, so the cap index.ts applied to its
+    // parsed copy has to be applied here too.
+    if (
+      typeof parsed.max_tokens === "number" &&
+      parsed.max_tokens > MAX_OUTPUT_TOKENS
+    ) {
+      parsed.max_tokens = MAX_OUTPUT_TOKENS;
+      // Anthropic refuses a thinking budget that is not below max_tokens.
+      const budget = parsed.thinking?.budget_tokens;
+      if (typeof budget === "number" && budget >= MAX_OUTPUT_TOKENS) {
+        parsed.thinking.budget_tokens = MAX_OUTPUT_TOKENS - 1;
+      }
+      touched = true;
+    }
     for (const k of SAMPLING_KEYS) {
       if (k in parsed) {
         delete parsed[k];
