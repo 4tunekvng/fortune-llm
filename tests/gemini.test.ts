@@ -907,6 +907,19 @@ describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", (
     expect(delta?.delta?.stop_reason).toBe("tool_use");
   });
 
+  it("ends with an error, not a clean stop, when Gemini did not finish", async () => {
+    // Arrange: Gemini cut the reply off mid-way, so it is not a final answer.
+    const upstream = makeUpstream([{ text: "Let's run a script." }], "SAFETY");
+
+    // Act
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const types = (await consumeDownstream(resp)).map((e) => e.type);
+
+    // Assert
+    expect(types).toContain("error");
+    expect(types).not.toContain("message_stop");
+  });
+
   it("emits stop_reason=stop_sequence when finishReason is STOP_SEQUENCE", async () => {
     const upstream = makeUpstream([{ text: "partial response" }], "STOP_SEQUENCE");
     const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
@@ -966,6 +979,81 @@ describe("callGeminiWithRotation", () => {
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
+
+  const geminiReply = (parts: unknown[], finishReason: string) =>
+    new Response(
+      JSON.stringify({
+        candidates: [{ content: { role: "model", parts }, finishReason }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  const streamedToolRequest = () =>
+    baseReq({
+      stream: true,
+      tools: [
+        {
+          name: "Bash",
+          description: "Run a command",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    });
+
+  it("fails the tier when Gemini botches a tool call", async () => {
+    // Arrange: Gemini announces a tool call, then stops without one.
+    fetchSpy.mockResolvedValueOnce(
+      geminiReply([{ text: "Let's run a script." }], "MALFORMED_FUNCTION_CALL"),
+    );
+
+    // Act
+    const call = callGeminiWithRotation(
+      ["k1"],
+      "gemini-2.5-flash",
+      streamedToolRequest(),
+      isQuotaError,
+    );
+
+    // Assert
+    await expect(call).rejects.toThrow(/did not finish.*MALFORMED_FUNCTION_CALL/);
+  });
+
+  it("fails the tier when a plain reply is cut off", async () => {
+    // Arrange
+    fetchSpy.mockResolvedValueOnce(geminiReply([{ text: "partial" }], "SAFETY"));
+
+    // Act
+    const call = callGeminiWithRotation(
+      ["k1"],
+      "gemini-2.5-flash",
+      baseReq(),
+      isQuotaError,
+    );
+
+    // Assert
+    await expect(call).rejects.toThrow(/did not finish.*SAFETY/);
+  });
+
+  it("streams a finished tool call back as tool_use", async () => {
+    // Arrange
+    fetchSpy.mockResolvedValueOnce(
+      geminiReply([{ functionCall: { name: "Bash", args: { command: "ls" } } }], "STOP"),
+    );
+
+    // Act
+    const resp = await callGeminiWithRotation(
+      ["k1"],
+      "gemini-2.5-flash",
+      streamedToolRequest(),
+      isQuotaError,
+    );
+    const body = await resp.text();
+
+    // Assert
+    expect(String(fetchSpy.mock.calls[0][0])).toContain(":generateContent");
+    expect(resp.headers.get("content-type")).toContain("text/event-stream");
+    expect(body).toContain('"stop_reason":"tool_use"');
+  });
 
   it("throws synchronously when given zero keys", async () => {
     await expect(
