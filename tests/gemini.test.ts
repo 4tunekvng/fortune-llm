@@ -1034,6 +1034,27 @@ describe("callGeminiWithRotation", () => {
     await expect(call).rejects.toThrow(/did not finish.*SAFETY/);
   });
 
+  it("fails the tier when Gemini blocks the prompt and sends nothing", async () => {
+    // Arrange: a blocked prompt has no candidates, so no finish reason either.
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ promptFeedback: { blockReason: "OTHER" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    // Act
+    const call = callGeminiWithRotation(
+      ["k1"],
+      "gemini-2.5-flash",
+      streamedToolRequest(),
+      isQuotaError,
+    );
+
+    // Assert
+    await expect(call).rejects.toThrow(/gemini returned an empty reply/);
+  });
+
   it("streams a finished tool call back as tool_use", async () => {
     // Arrange
     fetchSpy.mockResolvedValueOnce(
