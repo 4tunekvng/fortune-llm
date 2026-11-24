@@ -117,4 +117,10 @@ describe("scrubForAnthropic", () => {
     const out = JSON.parse(scrubForAnthropic(body));
     expect(out).toEqual({ messages: [], metadata: { user_id: "u_123" } });
   });
+
+  it("lowers max_tokens over the gateway cap to 65536", () => {
+    const body = JSON.stringify({ model: "x", max_tokens: 128000 });
+    const out = JSON.parse(scrubForAnthropic(body));
+    expect(out.max_tokens).toBe(65536);
+  });
 });
