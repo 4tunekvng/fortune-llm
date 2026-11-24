@@ -123,4 +123,14 @@ describe("scrubForAnthropic", () => {
     const out = JSON.parse(scrubForAnthropic(body));
     expect(out.max_tokens).toBe(65536);
   });
+
+  it("keeps a thinking budget below the lowered max_tokens", () => {
+    const body = JSON.stringify({
+      model: "x",
+      max_tokens: 128000,
+      thinking: { type: "enabled", budget_tokens: 100000 },
+    });
+    const out = JSON.parse(scrubForAnthropic(body));
+    expect(out.thinking.budget_tokens).toBe(65535);
+  });
 });

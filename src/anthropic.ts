@@ -90,6 +90,11 @@ export function scrubForAnthropic(rawBody: string): string {
       parsed.max_tokens > MAX_OUTPUT_TOKENS
     ) {
       parsed.max_tokens = MAX_OUTPUT_TOKENS;
+      // Anthropic refuses a thinking budget that is not below max_tokens.
+      const budget = parsed.thinking?.budget_tokens;
+      if (typeof budget === "number" && budget >= MAX_OUTPUT_TOKENS) {
+        parsed.thinking.budget_tokens = MAX_OUTPUT_TOKENS - 1;
+      }
       touched = true;
     }
     for (const k of SAMPLING_KEYS) {
