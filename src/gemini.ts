@@ -34,10 +34,22 @@ import {
   randomId,
   sseEventWriter,
   sseResponse,
+  synthesizeAnthropicSSE,
 } from "./sse.js";
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+
+// Finish reasons that mean Gemini completed its reply. Any other one, such as
+// MALFORMED_FUNCTION_CALL (it tried a tool call and botched it) or SAFETY,
+// means the reply was cut off. Passed on as a normal end, it tells an agent
+// loop like Claude Code that the model is done: the 2026-11-24 skills-evolution
+// runs stopped mid-task on "Let's run a Python script." with no tool call.
+const FINISHED_REASONS = new Set(["STOP", "MAX_TOKENS", "STOP_SEQUENCE"]);
+
+function unfinished(reason: string | undefined): boolean {
+  return reason !== undefined && !FINISHED_REASONS.has(reason);
+}
 /**
  * Google's documented stand-in for a function call it did not generate:
  * https://ai.google.dev/gemini-api/docs/thought-signatures (FAQ 1).
@@ -616,11 +628,14 @@ export async function callGemini(
   // we can inspect stop_reason before committing to a response. Force stream=false
   // in that case — mirrors the workers-ai path which already does this for all
   // tool-bearing calls.
+  const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
   const requireTools =
-    Array.isArray(req.tools) &&
-    req.tools.length > 0 &&
+    hasTools &&
     (req.metadata as { fortune_require_tools?: boolean } | undefined)?.fortune_require_tools === true;
-  const wantsStream = Boolean(req.stream) && !requireTools;
+  // A reply that may call a tool is read whole before anything is sent, as on
+  // Workers AI, so one Gemini did not finish can still fall through to the
+  // next tier; it is streamed back afterwards if the caller asked for that.
+  const wantsStream = Boolean(req.stream) && !hasTools;
   const action = wantsStream ? "streamGenerateContent" : "generateContent";
   const url = `${GEMINI_API_BASE}/models/${encodeURIComponent(opts.model)}:${action}${
     wantsStream ? "?alt=sse" : ""
@@ -648,7 +663,20 @@ export async function callGemini(
   }
 
   const parsed = (await upstream.json()) as GeminiResponse;
+  const finish = parsed.candidates?.[0]?.finishReason;
+  if (unfinished(finish)) {
+    throw new Error(
+      `Gemini did not finish its reply (${finish}). Falling through to next tier.`,
+    );
+  }
   const anthropicShape = geminiToAnthropicMessage(parsed, req.model || opts.model);
+  // A blocked prompt comes back with no candidate and so no finish reason.
+  // index.ts rejects an empty reply only when it is JSON, and this one may
+  // go back as a stream, so reject it here.
+  const said = anthropicShape.content.some(
+    (b) => b.type !== "text" || (b as { text: string }).text.trim() !== "",
+  );
+  if (!said) throw new Error("gemini returned an empty reply");
 
   // Tool-silence detection. Consumers that *must* see tool calls (verified
   // by `metadata.fortune_require_tools=true`) treat a text-only response
@@ -663,6 +691,7 @@ export async function callGemini(
     );
   }
 
+  if (req.stream) return synthesizeAnthropicSSE(anthropicShape);
   return new Response(JSON.stringify(anthropicShape), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -797,7 +826,17 @@ export function streamGeminiAsAnthropic(
           },
         });
       } finally {
-        if (!streamError) {
+        if (!streamError && unfinished(finishReason)) {
+          // Already streaming, so no other tier can take over: end on an
+          // error the caller sees and retries, not on a clean stop.
+          writeEvent("error", {
+            type: "error",
+            error: {
+              type: "api_error",
+              message: `Gemini did not finish its reply (${finishReason})`,
+            },
+          });
+        } else if (!streamError) {
           closeCurrentBlock();
           let stopReason: AnthropicStopReason = "end_turn";
           if (finishReason === "MAX_TOKENS") stopReason = "max_tokens";
