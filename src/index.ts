@@ -31,6 +31,7 @@ import {
   resolveGeminiModels,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_FALLBACK_MODELS,
+  pinnedGeminiModel,
   resolveGeminiKeys,
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
@@ -698,7 +699,7 @@ async function runChain(
       // circuit was already open at the top of this request loop.
       errors.push({ tier, error: msg });
       statsEvents.push({ kind: "tier_fail", tier });
-      await tripOnQuota(tier, err, msg, request, env, tripDurationMs);
+      await tripOnQuota(tier, err, msg, request, effectiveParsed, env, tripDurationMs);
     }
   }
 
@@ -848,6 +849,7 @@ async function tripOnQuota(
   err: unknown,
   msg: string,
   request: Request,
+  parsed: AnthropicMessagesRequest,
   env: Env,
   tripDurationMs: number,
 ): Promise<void> {
@@ -855,6 +857,9 @@ async function tripOnQuota(
   // A BYOK request exhausting the caller's own donated key must not
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
+  // Nor may one Gemini model a caller pinned by name: the others still answer.
+  const geminiDefault = env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+  if (tier === "gemini" && pinnedGeminiModel(geminiDefault, env.GEMINI_FALLBACK_MODELS, parsed.model)) return;
   // A timeout belongs to this one request (time-limit.ts), never the tier.
   const ms = err instanceof TierTimeoutError ? 0 : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);
@@ -1401,6 +1406,7 @@ async function invokeTier(
     const models = resolveGeminiModels(
       env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
       env.GEMINI_FALLBACK_MODELS,
+      parsed.model,
     );
     const { resp, model } = await callGeminiModels(
       keys,

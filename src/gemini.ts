@@ -599,10 +599,32 @@ export async function callGeminiModels(
   throw final instanceof Error ? final : new Error("No Gemini model configured");
 }
 
-/** The model list: the default first, then the fallbacks (comma-separated), no repeats. */
-export function resolveGeminiModels(primary: string, fallbacks: string | undefined): string[] {
+/** The default first, then the fallbacks (comma-separated), no repeats. */
+function configuredGeminiModels(primary: string, fallbacks: string | undefined): string[] {
   const rest = (fallbacks ?? DEFAULT_GEMINI_FALLBACK_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
   return [...new Set([primary, ...rest])];
+}
+
+/** The one configured model a caller named in `model`, or null. Only models
+ *  the gateway already uses can be pinned, so no caller can pick a costlier
+ *  one. Lets an eval test the lite model without spending flash's day. */
+export function pinnedGeminiModel(
+  primary: string,
+  fallbacks: string | undefined,
+  requested: unknown,
+): string | null {
+  if (typeof requested !== "string") return null;
+  return configuredGeminiModels(primary, fallbacks).includes(requested) ? requested : null;
+}
+
+/** The models to try in order: only the pinned one, else every configured one. */
+export function resolveGeminiModels(
+  primary: string,
+  fallbacks: string | undefined,
+  requested?: unknown,
+): string[] {
+  const pinned = pinnedGeminiModel(primary, fallbacks, requested);
+  return pinned ? [pinned] : configuredGeminiModels(primary, fallbacks);
 }
 
 function shuffleKeys<T>(arr: T[]): T[] {
