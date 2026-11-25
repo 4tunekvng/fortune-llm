@@ -210,6 +210,9 @@ The answer is `503` with a body apps can show as is:
 | `*` | `/v1/*` | Other Anthropic endpoints (count_tokens, batches) are forwarded **only** if `ANTHROPIC_API_KEY` is configured. Otherwise 501. |
 | OPTIONS | any | CORS preflight. |
 
+A path is matched after repeated slashes are collapsed and a trailing one
+dropped, so `/v1/messages/` and `/v1//messages` route like `/v1/messages`.
+
 ## Deploy
 
 Cloudflare account with Workers (free) and Workers AI (free tier covers

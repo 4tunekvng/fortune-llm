@@ -1011,6 +1011,21 @@ function parseMessagesBody(
   return parsed;
 }
 
+/**
+ * The request with its path in one spelling: repeated slashes collapsed
+ * and a trailing one dropped. Routing matches exact paths, so before this
+ * `/v1/messages/` missed the free chain and went to paid Anthropic as an
+ * Anthropic-only endpoint, even with fortune_route "free" (fortune-llm#61).
+ * The rebuilt request carries the new URL to forwardToAnthropic too.
+ */
+function withCanonicalPath(request: Request): Request {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/\/{2,}/g, "/").replace(/(.)\/$/, "$1");
+  if (path === url.pathname) return request;
+  url.pathname = path;
+  return new Request(url.toString(), request);
+}
+
 /** Routes served before /v1/ auth: stats, health, preflight and 404. */
 function routeOutsideApi(
   request: Request,
@@ -1048,6 +1063,7 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
+    request = withCanonicalPath(request);
     const url = new URL(request.url);
     const nonApi = routeOutsideApi(request, url, env);
     if (nonApi) return nonApi;
