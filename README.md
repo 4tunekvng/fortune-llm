@@ -309,6 +309,11 @@ GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
   (a botched tool call ends `MALFORMED_FUNCTION_CALL` with no call) can fail
   the tier and let the next one answer, instead of reaching the caller as a
   normal end.
+- A reply a free tier did not finish fails that tier: a finish reason other
+  than a normal stop, a length cut-off or a tool call (for example
+  `content_filter`, or OpenRouter's `error`), or a promised tool call that
+  never came. A reply already streaming when that happens ends on an error
+  event the caller can retry, since no other tier can take over mid-stream.
 
 ## License
 

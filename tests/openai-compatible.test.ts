@@ -28,6 +28,7 @@ describe("openAIToAnthropicMessage", () => {
         usage: { prompt_tokens: 7, completion_tokens: 3 },
       },
       "llama-3.3-70b-versatile",
+      "Groq",
     );
     expect(out.content).toEqual([{ type: "text", text: "hello there" }]);
     expect(out.stop_reason).toBe("end_turn");
@@ -58,6 +59,7 @@ describe("openAIToAnthropicMessage", () => {
         ],
       },
       "llama-3.3-70b-versatile",
+      "Groq",
     );
     expect(out.stop_reason).toBe("tool_use");
     expect(out.content).toEqual([
@@ -69,6 +71,7 @@ describe("openAIToAnthropicMessage", () => {
     const out = openAIToAnthropicMessage(
       { choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] },
       "llama-3.3-70b-versatile",
+      "Groq",
     );
     expect(out.content).toEqual([{ type: "text", text: "" }]);
   });
@@ -77,6 +80,7 @@ describe("openAIToAnthropicMessage", () => {
     const out = openAIToAnthropicMessage(
       { choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "length" }] },
       "test",
+      "Groq",
     );
     expect(out.stop_reason).toBe("max_tokens");
   });
@@ -99,12 +103,43 @@ describe("openAIToAnthropicMessage", () => {
         ],
       },
       "test",
+      "Groq",
     );
     expect(out.content).toEqual([
       { type: "text", text: "Let me check." },
       { type: "tool_use", id: "t1", name: "search", input: {} },
     ]);
     expect(out.stop_reason).toBe("tool_use");
+  });
+});
+
+describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
+  it("throws when the provider filtered the reply", () => {
+    const resp = {
+      choices: [
+        { index: 0, message: { role: "assistant" as const, content: "Let me" }, finish_reason: "content_filter" },
+      ],
+    };
+
+    expect(() => openAIToAnthropicMessage(resp, "m", "OpenRouter")).toThrow(
+      /OpenRouter did not finish its reply \(content_filter\)/,
+    );
+  });
+
+  it("throws when it promised a tool call and sent none", () => {
+    const resp = {
+      choices: [
+        { index: 0, message: { role: "assistant" as const, content: "" }, finish_reason: "tool_calls" },
+      ],
+    };
+
+    expect(() => openAIToAnthropicMessage(resp, "m", "Groq")).toThrow(/did not finish/);
+  });
+
+  it("still ends the turn when the provider sends no finish reason", () => {
+    const resp = { choices: [{ index: 0, message: { role: "assistant" as const, content: "hi" } }] };
+
+    expect(openAIToAnthropicMessage(resp, "m", "Groq").stop_reason).toBe("end_turn");
   });
 });
 
@@ -263,6 +298,24 @@ describe("callOpenAICompatible", () => {
     ).rejects.toThrow(/no tool calls/);
   });
 
+  it("throws on a cut-off reply so the next tier answers", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [{ index: 0, message: { role: "assistant", content: "half" }, finish_reason: "error" }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const call = callOpenAICompatible(
+      { label: "OpenRouter", url: "https://x", apiKey: "k", model: "m" },
+      baseReq({ tools: [{ name: "search", input_schema: { type: "object" } }] }),
+    );
+
+    await expect(call).rejects.toThrow(/did not finish its reply \(error\)/);
+  });
+
   it("returns SSE for streaming requests", async () => {
     const sseLines = [
       'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}',
@@ -305,6 +358,41 @@ describe("callOpenAICompatible", () => {
 });
 
 describe("streamOpenAIAsAnthropic", () => {
+  const upstreamOf = (frames: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const f of frames) controller.enqueue(encoder.encode(f + "\n\n"));
+        controller.close();
+      },
+    });
+
+  it("ends on an error, not a clean stop, when the provider cuts the reply off", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"Let me run"}}]}',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}',
+      "data: [DONE]",
+    ]);
+
+    const text = await streamOpenAIAsAnthropic(upstream, "m", "Cerebras").text();
+
+    expect(text).toContain("event: error");
+    expect(text).toContain("Cerebras did not finish its reply (content_filter)");
+    expect(text).not.toContain("message_stop");
+  });
+
+  it("ends on an error when it promised a tool call and streamed none", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"tool_calls"}]}',
+      "data: [DONE]",
+    ]);
+
+    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+
+    expect(text).toContain("event: error");
+    expect(text).not.toContain('"stop_reason":"tool_use"');
+  });
+
   it("reconstructs tool-use deltas split across multiple SSE frames", async () => {
     // OpenAI emits tool_calls with id+name on the first chunk for that
     // index, then function.arguments fragments on subsequent chunks. The

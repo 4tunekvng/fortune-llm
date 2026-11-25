@@ -7,6 +7,7 @@ import {
   translateTools,
   translateToolChoice,
   streamWorkersAiAsAnthropic,
+  callWorkersAi,
 } from "../src/workers-ai.js";
 import type { AnthropicMessagesRequest } from "../src/types.js";
 
@@ -353,17 +354,71 @@ describe("workersAiToAnthropicMessage", () => {
   });
 });
 
+describe("workersAiToAnthropicMessage on a reply the model did not finish", () => {
+  const input = buildWorkersAiInput({
+    model: "m",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  it("throws on an unknown finish reason so the next tier answers", () => {
+    const result = {
+      choices: [{ message: { role: "assistant", content: "half" }, finish_reason: "content_filter" }],
+    };
+
+    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(
+      /Workers AI did not finish its reply \(content_filter\)/,
+    );
+  });
+
+  it("throws when it promised a tool call and sent none", () => {
+    const result = { choices: [{ message: { role: "assistant", content: "" }, finish_reason: "tool_calls" }] };
+
+    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(/did not finish/);
+  });
+});
+
+describe("callWorkersAi with tools", () => {
+  const toolReq: AnthropicMessagesRequest = {
+    model: "m",
+    max_tokens: 64,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "search", input_schema: { type: "object" } }],
+  };
+  const aiReturning = (result: unknown) => ({ run: async () => result });
+
+  it("throws on a cut-off reply before anything is streamed", async () => {
+    const ai = aiReturning({
+      choices: [{ message: { role: "assistant", content: "half" }, finish_reason: "content_filter" }],
+    });
+
+    await expect(callWorkersAi(ai, "m", toolReq)).rejects.toThrow(/did not finish/);
+  });
+
+  it("streams a finished tool call back as tool_use", async () => {
+    const ai = aiReturning({
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: '{"q":"a"}' } }],
+    });
+
+    const text = await (await callWorkersAi(ai, "m", toolReq)).text();
+
+    expect(text).toContain('"partial_json":"{\\"q\\":\\"a\\"}"');
+    expect(text).toContain('"stop_reason":"tool_use"');
+  });
+});
+
 describe("extractWorkersAiDelta", () => {
   it("returns the response field for normal frames", () => {
-    expect(extractWorkersAiDelta('{"response":"abc"}')).toBe("abc");
+    expect(extractWorkersAiDelta('{"response":"abc"}').text).toBe("abc");
   });
 
   it("returns null for malformed JSON", () => {
-    expect(extractWorkersAiDelta("not json")).toBe(null);
+    expect(extractWorkersAiDelta("not json").text).toBe(null);
   });
 
   it("returns null when response is not a string", () => {
-    expect(extractWorkersAiDelta('{"response": 42}')).toBe(null);
+    expect(extractWorkersAiDelta('{"response": 42}').text).toBe(null);
   });
 
   it("reads the OpenAI-style delta that Gemma 4 streams", () => {
@@ -371,13 +426,13 @@ describe("extractWorkersAiDelta", () => {
       '{"object":"chat.completion.chunk","choices":[{"index":0,' +
       '"delta":{"content":"Pick one thing."},"finish_reason":null}]}';
 
-    expect(extractWorkersAiDelta(frame)).toBe("Pick one thing.");
+    expect(extractWorkersAiDelta(frame).text).toBe("Pick one thing.");
   });
 
   it("never passes on the model's reasoning as reply text", () => {
     const frame = '{"choices":[{"index":0,"delta":{"reasoning":"   Goal"}}]}';
 
-    expect(extractWorkersAiDelta(frame)).toBe(null);
+    expect(extractWorkersAiDelta(frame).text).toBe(null);
   });
 });
 
@@ -497,6 +552,30 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text.match(/event: content_block_delta/g)).toHaveLength(1);
     expect(text).toContain('"text":"Hello there"');
     expect(text).not.toContain("Goal");
+  });
+
+  it("ends on an error when a Gemma 4 stream is cut off", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"Let me"}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain("Workers AI did not finish its reply (content_filter)");
+    expect(text).not.toContain("message_stop");
+  });
+
+  it("reports a stream that ran out of tokens as max_tokens", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"long"},"finish_reason":"length"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain('"stop_reason":"max_tokens"');
   });
 
   it("reassembles a frame split across chunks", async () => {

@@ -25,10 +25,14 @@
 import type {
   AnthropicMessagesRequest,
   AnthropicMessageResponse,
-  AnthropicStopReason,
   OpenAIToolCall,
 } from "./types.js";
-import { buildWorkersAiInput, toAnthropicContent } from "./workers-ai.js";
+import {
+  buildWorkersAiInput,
+  openAIStopReason,
+  toAnthropicContent,
+  unfinishedReplyError,
+} from "./workers-ai.js";
 import { UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
@@ -170,7 +174,7 @@ export async function callOpenAICompatible(
   if (parsed.error) {
     throw new Error(`${config.label} error: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
   }
-  const anthropicShape = openAIToAnthropicMessage(parsed, req.model || config.model);
+  const anthropicShape = openAIToAnthropicMessage(parsed, req.model || config.model, config.label);
 
   // Tool-silence detection. Matches the same opt-in semantics workers-ai
   // and gemini use: callers that require a tool call set
@@ -192,11 +196,13 @@ export async function callOpenAICompatible(
 
 /**
  * Translate a non-streaming OpenAI chat-completions response into the
- * Anthropic message shape consumers expect.
+ * Anthropic message shape consumers expect. Throws when the provider cut
+ * the reply off, so the chain tries the next tier.
  */
 export function openAIToAnthropicMessage(
   resp: OpenAIChatResponse,
   modelLabel: string,
+  providerLabel: string,
 ): AnthropicMessageResponse {
   const choice = resp.choices?.[0];
   const msg = choice?.message;
@@ -206,16 +212,8 @@ export function openAIToAnthropicMessage(
   const content = toAnthropicContent(text, toolCalls);
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
-  let stopReason: AnthropicStopReason = "end_turn";
-  if (validToolCalls.length > 0) {
-    stopReason = "tool_use";
-  } else if (choice?.finish_reason === "length") {
-    stopReason = "max_tokens";
-  } else if (choice?.finish_reason === "stop" || choice?.finish_reason === undefined) {
-    stopReason = "end_turn";
-  } else if (choice?.finish_reason === "tool_calls" || choice?.finish_reason === "function_call") {
-    stopReason = "tool_use";
-  }
+  const stopReason = openAIStopReason(choice?.finish_reason, validToolCalls.length);
+  if (stopReason === null) throw unfinishedReplyError(providerLabel, choice?.finish_reason);
 
   return {
     id: resp.id ?? `msg_oai_${randomId()}`,
@@ -332,21 +330,24 @@ export function streamOpenAIAsAnthropic(
           },
         });
       } finally {
-        if (!streamError) {
+        const stopReason = openAIStopReason(finishReason, emittedToolUse ? 1 : 0);
+        if (!streamError && stopReason === null) {
+          // Already streaming, so no other tier can take over: end on an
+          // error the caller sees and retries, not on a clean stop.
+          writeEvent("error", {
+            type: "error",
+            error: {
+              type: "api_error",
+              message: `${providerLabel} did not finish its reply (${finishReason})`,
+            },
+          });
+        } else if (!streamError) {
           // Close any open blocks.
           for (const state of toolByIndex.values()) {
             writeEvent("content_block_stop", { type: "content_block_stop", index: state.blockIndex });
           }
           closeTextBlock();
 
-          let stopReason: AnthropicStopReason = "end_turn";
-          if (emittedToolUse) {
-            stopReason = "tool_use";
-          } else if (finishReason === "length") {
-            stopReason = "max_tokens";
-          } else if (finishReason === "tool_calls" || finishReason === "function_call") {
-            stopReason = "tool_use";
-          }
           writeEvent("message_delta", {
             type: "message_delta",
             delta: { stop_reason: stopReason, stop_sequence: null },
