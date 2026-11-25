@@ -290,7 +290,7 @@ export async function callWorkersAi(
   // and sometimes spent all of max_tokens before a word of the answer.
   // With thinking off the same question took 1.8 s. Anthropic-style
   // requests ask for no thinking, so this matches the Gemini tier, which
-  // turns it off for the same reason (gemini.ts).
+  // turns it off on its 2.5 models for the same reason (gemini.ts).
   const input: WorkersAiChatRequest = {
     ...buildWorkersAiInput(req),
     chat_template_kwargs: { enable_thinking: false },

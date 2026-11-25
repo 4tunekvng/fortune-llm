@@ -221,7 +221,8 @@ function defaultFreeChain(req: AnthropicMessagesRequest): BackendKind[] {
   //   mistral        — free experimental tier; fails in under 1 s (429 today)
   //   github-models  — Azure-backed, free with any GitHub account
   //   openrouter     — 2-60 s; meta-router with multi-model fallback
-  //   workers-ai     — 11-64 s and more; Cloudflare account-scoped neurons
+  //   workers-ai     — about 4 s for a site answer since thinking went off
+  //                    (was 11-64 s); Cloudflare account-scoped neurons
   // The pools are the same as before, so when gemini's quota runs out the
   // chain lands where it used to; it is faster whenever gemini answers.
   return [
