@@ -316,6 +316,41 @@ describe("callOpenAICompatible", () => {
     await expect(call).rejects.toThrow(/did not finish its reply \(error\)/);
   });
 
+  it("streams the checked reply back when the caller asked for a stream and a tool call", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: '{"q":"a"}' } }],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const resp = await callOpenAICompatible(
+      { label: "Groq", url: "https://x", apiKey: "k", model: "m" },
+      baseReq({
+        stream: true,
+        tools: [{ name: "search", input_schema: { type: "object" } }],
+        metadata: { fortune_require_tools: true },
+      }),
+    );
+    const text = await resp.text();
+
+    expect(resp.headers.get("content-type")).toMatch(/event-stream/);
+    expect(text).toContain('"name":"search"');
+    expect(text).toContain('"stop_reason":"tool_use"');
+  });
+
   it("returns SSE for streaming requests", async () => {
     const sseLines = [
       'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}',

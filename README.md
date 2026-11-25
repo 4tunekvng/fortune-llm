@@ -302,13 +302,13 @@ GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
 - `count_tokens` and `batches` endpoints are Anthropic-specific —
   they only work if Anthropic is configured. Most consumer apps don't
   use them.
-- Streaming for Workers AI and Gemini calls that offer tools is
-  *synthesized* from a buffered non-streamed call. The wire shape is
-  correct Anthropic SSE but the deltas arrive in one burst rather than
-  truly token-by-token. Gemini's is read whole so a reply it did not finish
-  (a botched tool call ends `MALFORMED_FUNCTION_CALL` with no call) can fail
-  the tier and let the next one answer, instead of reaching the caller as a
-  normal end.
+- Streaming for Workers AI and Gemini calls that offer tools, and for any
+  call with `fortune_require_tools`, is *synthesized* from a buffered
+  non-streamed call. The wire shape is correct Anthropic SSE but the deltas
+  arrive in one burst rather than truly token-by-token. The reply is read
+  whole so one the model did not finish (a botched Gemini tool call ends
+  `MALFORMED_FUNCTION_CALL` with no call) can fail the tier and let the next
+  one answer, instead of reaching the caller as a normal end.
 - A reply a free tier did not finish fails that tier: a finish reason other
   than a normal stop, a length cut-off or a tool call (for example
   `content_filter`, or OpenRouter's `error`), or a promised tool call that

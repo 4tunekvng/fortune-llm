@@ -41,6 +41,7 @@ import {
   randomId,
   sseEventWriter,
   sseResponse,
+  synthesizeAnthropicSSE,
 } from "./sse.js";
 
 /**
@@ -188,6 +189,9 @@ export async function callOpenAICompatible(
     );
   }
 
+  // A caller that asked for a stream gets one, even though this reply was
+  // read whole to check it for a tool call.
+  if (body.stream) return synthesizeAnthropicSSE(anthropicShape);
   return new Response(JSON.stringify(anthropicShape), {
     status: 200,
     headers: { "content-type": "application/json" },
