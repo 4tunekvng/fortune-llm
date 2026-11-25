@@ -964,6 +964,11 @@ async function handleAnthropicOnly(
         ` is not configured. Free backends only support /v1/messages.`,
     );
   }
+  // scrubForAnthropic caps max_tokens only in a body it can read, so one
+  // it can't (NaN, a stray comma) is refused here, as /v1/messages does.
+  if (rawBody && !readsAsJson(rawBody)) {
+    return jsonError(400, "invalid_request_error", "Body must be valid JSON.");
+  }
   try {
     return withCors(
       await forwardToAnthropic(request, rawBody, env.ANTHROPIC_API_KEY),
@@ -975,6 +980,15 @@ async function handleAnthropicOnly(
       "upstream_error",
       "Anthropic upstream failed. Please try again.",
     );
+  }
+}
+
+function readsAsJson(body: string): boolean {
+  try {
+    JSON.parse(body);
+    return true;
+  } catch {
+    return false;
   }
 }
 
