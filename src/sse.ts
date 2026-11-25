@@ -36,6 +36,29 @@ export function sseEventWriter(
 }
 
 /**
+ * Wraps a stream translator's writer so an upstream frame that writes
+ * nothing (reasoning the translator drops, a tool call still being built)
+ * still shows the stream is alive, with at most one Anthropic `ping` per
+ * `everyMs`. The gateway's quiet-gap cut (stream-gate.ts) watches the
+ * translated output, not the provider's bytes; the SDK ignores pings.
+ */
+export function keepAliveWriter(
+  writeEvent: (event: string, data: unknown) => void,
+  everyMs = 1_000,
+  now: () => number = Date.now,
+): { writeEvent: (event: string, data: unknown) => void; sawFrame: () => void } {
+  let last = now();
+  const write = (event: string, data: unknown) => {
+    last = now();
+    writeEvent(event, data);
+  };
+  const sawFrame = () => {
+    if (now() - last >= everyMs) write("ping", { type: "ping" });
+  };
+  return { writeEvent: write, sawFrame };
+}
+
+/**
  * message_start: the envelope without content. The Anthropic SDK's stream
  * parser uses it to initialize the message that later events fill in.
  * output_tokens starts at 0; the final count arrives via message_delta.

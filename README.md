@@ -117,10 +117,16 @@ abort signal) when the limit runs out, and the chain moves to the next tier.
 | Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s on openrouter. Workers AI took up to 64 s while its model thought before answering; with thinking off (2026-11-24) tellar's 40 visitor questions took 4.2 s at the median and 21 s at most, eight at a time. Only the chain budget bounds them. |
 | Chain budget, all free tiers together | the caller's timeout less 2 s, else 80 s | The SDK sends each call's timeout in `X-Stainless-Timeout`; the budget ends 2 s before it, so the caller gets an answer before it gives up, and a caller that chose to wait longer (Maestro's 100 s plan call) is not cut short. Without the header, `CHAIN_TIME_LIMIT_MS` (default 80 s). Tiers left when it is spent are not tried. |
 | Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
+| Quiet gap in a free tier's stream, once its first words are out | 10 s | Every measured tier writes continuously once it starts, so a gap as long as the fast tiers' 10 s base is a stall. A provider still sending reasoning or building a tool call is not quiet: the translators send an Anthropic `ping` at most once a second for frames they don't pass on. The stream then ends on an error event and the upstream call is stopped. Override with `STREAM_IDLE_MS`. Paid Anthropic streams pass straight through, with no gap limit. |
 
-For a stream the limit covers the wait for the response to start; once it
-has started it is never cut. A stream that is read whole first (see
-Limitations) has its limit cover the whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
+A free tier's stream is held until its first words (`src/stream-gate.ts`):
+a non-blank text delta, a tool-call fragment or a tool_use block. Nothing
+goes to the caller before then, so a stream that fails, ends, or finishes
+blank before its first words fails that tier and the chain tries the next,
+as a failed whole reply does; the tier's limit covers this wait. After the
+first words no other tier can take over, so only a quiet gap cuts it. A
+stream that is read whole first (see Limitations) has its limit cover the
+whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
 were measured on prompts under 10K tokens); only the chain budget bounds it.
 
 ## Private callers
@@ -314,8 +320,12 @@ GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
   than a normal stop, a length cut-off or a tool call (for example
   `content_filter`, OpenRouter's `error`, or Mistral's `model_length`), or
   a promised tool call that never came. A tool call cut off by the length
-  limit reports `max_tokens`, not `tool_use`. A reply already streaming when that happens ends on an error
-  event the caller can retry, since no other tier can take over mid-stream.
+  limit reports `max_tokens`, not `tool_use`. A reply already streaming
+  when that happens ends on an error event the caller can retry, since no
+  other tier can take over mid-stream. So does a stream that closes with no
+  sign it finished: Gemini with no `finishReason` (Google documents an
+  empty one as "has not stopped generating"), the other tiers with neither
+  a finish reason nor `[DONE]`.
 
 ## License
 

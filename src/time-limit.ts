@@ -29,6 +29,10 @@
  * tier limit either: the speeds above were measured on prompts under 10K
  * tokens.
  *
+ * A free tier's stream is held until its first words (stream-gate.ts) under
+ * these limits, so one that fails before then falls through; after that a
+ * quiet gap of streamIdleMs cuts it.
+ *
  * A timeout never shuts the tier for other requests: one slow reply says
  * nothing certain about the next (a 60 s trip on 2026-11-21 sent every app
  * to the slow tiers within a minute of going live).
@@ -108,6 +112,17 @@ export function tierLimitMs(
   return FAST_TIER_BASE_MS + FAST_TIER_MS_PER_TOKEN * maxTokens;
 }
 
+/**
+ * Longest quiet gap allowed in a free tier's stream once its first words
+ * have gone out. Every measured tier writes continuously once it starts
+ * (gemini about 600 tokens a second), so a gap as long as FAST_TIER_BASE_MS,
+ * the mark above for a hung call, is a stall. Override with STREAM_IDLE_MS.
+ */
+export function streamIdleMs(env: Record<string, unknown>): number {
+  const raw = env.STREAM_IDLE_MS;
+  return positiveMs(typeof raw === "string" ? raw : undefined) ?? FAST_TIER_BASE_MS;
+}
+
 /** Thrown when a tier call runs past its limit. */
 export class TierTimeoutError extends Error {
   constructor(
@@ -122,8 +137,9 @@ export class TierTimeoutError extends Error {
 /**
  * Run `call` with an abort signal that fires after `ms`. The call gets the
  * signal so its fetch is cancelled; the race makes sure the chain moves on
- * even if some step ignores it. The timer is cleared once the call returns,
- * so a stream that has started is never cut.
+ * even if some step ignores it. The timer is cleared once the call returns;
+ * a free tier's stream is held until its first words inside the call, and
+ * after that only a quiet gap (streamIdleMs) cuts it.
  */
 export async function withTimeLimit<T>(
   call: (signal: AbortSignal) => Promise<T>,

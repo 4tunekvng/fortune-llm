@@ -36,6 +36,7 @@ import {
   parseSseDataLine,
   readSseFrames,
   randomId,
+  keepAliveWriter,
   sseEventWriter,
   saysSomething,
   sseResponse,
@@ -509,7 +510,7 @@ export function streamWorkersAiAsAnthropic(
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = sseEventWriter(controller);
+      const { writeEvent, sawFrame } = keepAliveWriter(sseEventWriter(controller));
 
       writeEvent("message_start", messageStartEvent(messageId, modelLabel));
       writeEvent("content_block_start", {
@@ -521,8 +522,11 @@ export function streamWorkersAiAsAnthropic(
       let outputTokenCount = 0;
       let streamError = false;
       let finishReason: string | undefined;
+      // A stream that ends with neither [DONE] nor a finish reason was cut.
+      let sawDone = false;
       const processFrame = (frame: string) => {
         const payload = parseSseDataLine(frame);
+        if (payload === "[DONE]") sawDone = true;
         if (!payload || payload === "[DONE]") return;
         const { text: delta, finishReason: reason } = extractWorkersAiDelta(payload);
         if (reason) finishReason = reason;
@@ -535,7 +539,10 @@ export function streamWorkersAiAsAnthropic(
         });
       };
       try {
-        await readSseFrames(upstream, processFrame);
+        await readSseFrames(upstream, (frame) => {
+          processFrame(frame);
+          sawFrame();
+        });
       } catch (err) {
         streamError = true;
         console.error("fortune-llm: Workers AI stream failed:", err);
@@ -547,7 +554,8 @@ export function streamWorkersAiAsAnthropic(
           },
         });
       } finally {
-        const stopReason = openAIStopReason(finishReason, 0);
+        const cut = !sawDone && finishReason === undefined;
+        const stopReason = cut ? null : openAIStopReason(finishReason, 0);
         if (!streamError && stopReason === null) {
           // Already streaming, so no other tier can take over: end on an
           // error the caller sees and retries, not on a clean stop.
@@ -555,7 +563,9 @@ export function streamWorkersAiAsAnthropic(
             type: "error",
             error: {
               type: "api_error",
-              message: `Workers AI did not finish its reply (${finishReason})`,
+              message: `Workers AI did not finish its reply (${
+                finishReason ?? "stream cut off"
+              })`,
             },
           });
         } else if (!streamError) {

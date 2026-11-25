@@ -32,6 +32,7 @@ import {
   parseSseDataLine,
   readSseFrames,
   randomId,
+  keepAliveWriter,
   sseEventWriter,
   sseResponse,
   saysSomething,
@@ -776,7 +777,7 @@ export function streamGeminiAsAnthropic(
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = sseEventWriter(controller);
+      const { writeEvent, sawFrame } = keepAliveWriter(sseEventWriter(controller));
 
       writeEvent("message_start", messageStartEvent(messageId, modelLabel));
 
@@ -815,7 +816,10 @@ export function streamGeminiAsAnthropic(
       };
 
       try {
-        await readSseFrames(upstream, processFrame);
+        await readSseFrames(upstream, (frame) => {
+          processFrame(frame);
+          sawFrame();
+        });
       } catch {
         streamError = true;
         writeEvent("error", {
@@ -826,14 +830,19 @@ export function streamGeminiAsAnthropic(
           },
         });
       } finally {
-        if (!streamError && unfinished(finishReason)) {
+        // Google documents an empty finishReason as "the model has not
+        // stopped generating", so a stream that closes without one was cut.
+        const cut = finishReason === undefined;
+        if (!streamError && (cut || unfinished(finishReason))) {
           // Already streaming, so no other tier can take over: end on an
           // error the caller sees and retries, not on a clean stop.
           writeEvent("error", {
             type: "error",
             error: {
               type: "api_error",
-              message: `Gemini did not finish its reply (${finishReason})`,
+              message: `Gemini did not finish its reply (${
+                finishReason ?? "stream cut off"
+              })`,
             },
           });
         } else if (!streamError) {
