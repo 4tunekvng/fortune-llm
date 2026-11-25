@@ -272,6 +272,8 @@ export function streamOpenAIAsAnthropic(
       let nextBlockIndex = 0;
       let emittedToolUse = false;
       let finishReason: string | undefined;
+      // A stream that ends with neither [DONE] nor a finish reason was cut.
+      let sawDone = false;
       let inputTokens = 0;
       let outputTokens = 0;
       let streamError = false;
@@ -340,7 +342,9 @@ export function streamOpenAIAsAnthropic(
           },
         });
       } finally {
-        const stopReason = openAIStopReason(finishReason, emittedToolUse ? 1 : 0);
+        const cut = !sawDone && finishReason === undefined;
+        const toolCalls = emittedToolUse ? 1 : 0;
+        const stopReason = cut ? null : openAIStopReason(finishReason, toolCalls);
         if (!streamError && stopReason === null) {
           // Already streaming, so no other tier can take over: end on an
           // error the caller sees and retries, not on a clean stop.
@@ -348,7 +352,9 @@ export function streamOpenAIAsAnthropic(
             type: "error",
             error: {
               type: "api_error",
-              message: `${providerLabel} did not finish its reply (${finishReason})`,
+              message: `${providerLabel} did not finish its reply (${
+                finishReason ?? "stream cut off"
+              })`,
             },
           });
         } else if (!streamError) {
@@ -375,7 +381,10 @@ export function streamOpenAIAsAnthropic(
       function processFrame(frame: string) {
         const payload = parseSseDataLine(frame);
         if (!payload) return;
-        if (payload === "[DONE]") return;
+        if (payload === "[DONE]") {
+          sawDone = true;
+          return;
+        }
         let parsed: OpenAIStreamChunk;
         try {
           parsed = JSON.parse(payload) as OpenAIStreamChunk;

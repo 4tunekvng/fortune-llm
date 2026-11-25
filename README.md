@@ -320,8 +320,12 @@ GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
   than a normal stop, a length cut-off or a tool call (for example
   `content_filter`, OpenRouter's `error`, or Mistral's `model_length`), or
   a promised tool call that never came. A tool call cut off by the length
-  limit reports `max_tokens`, not `tool_use`. A reply already streaming when that happens ends on an error
-  event the caller can retry, since no other tier can take over mid-stream.
+  limit reports `max_tokens`, not `tool_use`. A reply already streaming
+  when that happens ends on an error event the caller can retry, since no
+  other tier can take over mid-stream. So does a stream that closes with no
+  sign it finished: Gemini with no `finishReason` (Google documents an
+  empty one as "has not stopped generating"), the other tiers with neither
+  a finish reason nor `[DONE]`.
 
 ## License
 

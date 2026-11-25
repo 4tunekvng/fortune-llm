@@ -464,6 +464,17 @@ describe("streamOpenAIAsAnthropic", () => {
     expect(text).not.toContain("message_stop");
   });
 
+  it("ends on an error when cut with no finish reason or [DONE]", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"Let me"}}]}',
+    ]);
+
+    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+
+    expect(text).toContain("Groq did not finish its reply (stream cut off)");
+    expect(text).not.toContain("message_stop");
+  });
+
   it("ends on an error when it promised a tool call and streamed none", async () => {
     const upstream = upstreamOf([
       'data: {"choices":[{"index":0,"delta":{"content":"ok"},' +

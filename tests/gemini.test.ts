@@ -920,6 +920,22 @@ describe("streamGeminiAsAnthropic — stop_reason in the final message_delta", (
     expect(types).not.toContain("message_stop");
   });
 
+  it("ends with an error when the stream closes with no finishReason", async () => {
+    // Arrange: cut after a few words; Google documents an empty
+    // finishReason as "the model has not stopped generating".
+    const chunk = { candidates: [{ content: { parts: [{ text: "Let me" }] } }] };
+    const sse = `data: ${JSON.stringify(chunk)}\n\n`;
+    const upstream = new Response(sse).body as ReadableStream<Uint8Array>;
+
+    // Act
+    const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");
+    const types = (await consumeDownstream(resp)).map((e) => e.type);
+
+    // Assert
+    expect(types).toContain("error");
+    expect(types).not.toContain("message_stop");
+  });
+
   it("emits stop_reason=stop_sequence when finishReason is STOP_SEQUENCE", async () => {
     const upstream = makeUpstream([{ text: "partial response" }], "STOP_SEQUENCE");
     const resp = streamGeminiAsAnthropic(upstream, "gemini-2.5-flash");

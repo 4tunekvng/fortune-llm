@@ -585,6 +585,15 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text).not.toContain("message_stop");
   });
 
+  it("ends on an error when cut with no finish reason or [DONE]", async () => {
+    const upstream = upstreamOf(['data: {"response":"Let me"}\n\n']);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
+
+    expect(text).toContain("Workers AI did not finish its reply (stream cut off)");
+    expect(text).not.toContain("message_stop");
+  });
+
   it("reports a stream that ran out of tokens as max_tokens", async () => {
     const upstream = upstreamOf([
       'data: {"choices":[{"index":0,"delta":{"content":"long"},' +
@@ -616,7 +625,11 @@ describe("streamWorkersAiAsAnthropic", () => {
   });
 
   it("skips frames with no response text", async () => {
-    const upstream = upstreamOf(['data: {"usage":{}}\n\n', ": ping\n\n"]);
+    const upstream = upstreamOf([
+      'data: {"usage":{}}\n\n',
+      ": ping\n\n",
+      "data: [DONE]\n\n",
+    ]);
 
     const text = await streamWorkersAiAsAnthropic(upstream, "m").text();
 

@@ -826,14 +826,19 @@ export function streamGeminiAsAnthropic(
           },
         });
       } finally {
-        if (!streamError && unfinished(finishReason)) {
+        // Google documents an empty finishReason as "the model has not
+        // stopped generating", so a stream that closes without one was cut.
+        const cut = finishReason === undefined;
+        if (!streamError && (cut || unfinished(finishReason))) {
           // Already streaming, so no other tier can take over: end on an
           // error the caller sees and retries, not on a clean stop.
           writeEvent("error", {
             type: "error",
             error: {
               type: "api_error",
-              message: `Gemini did not finish its reply (${finishReason})`,
+              message: `Gemini did not finish its reply (${
+                finishReason ?? "stream cut off"
+              })`,
             },
           });
         } else if (!streamError) {
