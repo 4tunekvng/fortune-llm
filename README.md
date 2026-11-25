@@ -207,8 +207,11 @@ The answer is `503` with a body apps can show as is:
 | GET | `/healthz` | Liveness; reports default OSS + Gemini models and which backends are configured. |
 | GET | `/stats` | Today's (UTC) requests and per-tier results, split by app (needs the gateway token). An app names itself with `x-fortune-consumer: <app>`; a request without it is named `unknown-<guess>` from what it carries: `unknown-claude-code`, `unknown-worker-<zone>` for a Worker (one label for every app on that domain, such as fortuneking.dev, so apps should name themselves), else its SDK language or user agent. |
 | POST | `/v1/messages` | Routes per the diagram above. |
-| `*` | `/v1/*` | Other Anthropic endpoints (count_tokens, batches) are forwarded **only** if `ANTHROPIC_API_KEY` is configured. Otherwise 501. |
+| `*` | `/v1/messages/count_tokens`, `/v1/messages/batches[/<id>[/results\|/cancel]]`, `/v1/models[/<id>]` | Forwarded to Anthropic **only** if `ANTHROPIC_API_KEY` is configured. Otherwise 501. Any other `/v1/` path is a 404, so no other spelling of `/v1/messages` skips the free chain. |
 | OPTIONS | any | CORS preflight. |
+
+A path is matched after repeated slashes are collapsed and a trailing one
+dropped, so `/v1/messages/` and `/v1//messages` route like `/v1/messages`.
 
 ## Deploy
 

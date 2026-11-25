@@ -814,6 +814,91 @@ describe("fetch handler routing before the chain", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
+  it("serves /v1/messages/ with a trailing slash from the free chain", async () => {
+    const upstream = vi.fn(async () => Response.json({}));
+    vi.stubGlobal("fetch", upstream);
+    const body = JSON.stringify({
+      model: "claude-haiku-4-5",
+      max_tokens: 10,
+      metadata: { fortune_route: "free" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const resp = await call(
+      "/v1/messages/",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("serves /v1//messages with a doubled slash from the free chain", async () => {
+    const body = JSON.stringify({
+      model: "claude-haiku-4-5",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const resp = await call(
+      "/v1//messages",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body },
+    );
+
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+  });
+
+  it("forwards a paid-only path to Anthropic without a trailing slash", async () => {
+    const upstream = vi.fn(async (_url: string) => Response.json({}));
+    vi.stubGlobal("fetch", upstream);
+
+    await call(
+      "/v1/messages/count_tokens/",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body: "{}" },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(upstream.mock.calls[0]?.[0]).toBe(
+      "https://api.anthropic.com/v1/messages/count_tokens",
+    );
+  });
+
+  it("answers /healthz/ with a trailing slash", async () => {
+    const resp = await call("/healthz/", { method: "GET" });
+
+    expect(resp.status).toBe(200);
+  });
+
+  it("answers 404, not paid Anthropic, to a misspelled messages path", async () => {
+    const upstream = vi.fn(async () => Response.json({}));
+    vi.stubGlobal("fetch", upstream);
+
+    const resp = await call(
+      "/v1/m%65ssages",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body: "{}" },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.status).toBe(404);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("forwards a batch's results to Anthropic", async () => {
+    const upstream = vi.fn(async (_url: string) => Response.json({}));
+    vi.stubGlobal("fetch", upstream);
+
+    await call(
+      "/v1/messages/batches/msgbatch_01Ab/results",
+      { method: "GET", headers: { "x-api-key": "gateway-token" } },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(upstream.mock.calls[0]?.[0]).toBe(
+      "https://api.anthropic.com/v1/messages/batches/msgbatch_01Ab/results",
+    );
+  });
+
   it("answers 502 when the Anthropic forward throws", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
 
