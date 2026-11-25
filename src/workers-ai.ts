@@ -37,6 +37,7 @@ import {
   readSseFrames,
   randomId,
   sseEventWriter,
+  saysSomething,
   sseResponse,
   synthesizeAnthropicSSE,
 } from "./sse.js";
@@ -321,6 +322,9 @@ export async function callWorkersAi(
     }
 
     const body = workersAiToAnthropicMessage(raw, req.model || model, nonStreamInput);
+    // index.ts rejects an empty reply only when it is JSON, and this one may
+    // go back as a stream, so reject it here.
+    if (!saysSomething(body)) throw new Error("Workers AI returned an empty reply");
     if (wantsStream) return synthesizeAnthropicSSE(body);
     return new Response(JSON.stringify(body), {
       status: 200,
@@ -426,14 +430,18 @@ export function openAIStopReason(
   toolCallCount: number,
 ): AnthropicStopReason | null {
   if (finishReason && !FINISHED_REASONS.has(finishReason)) return null;
-  if (toolCallCount > 0) return "tool_use";
+  // Checked before tool calls: a call cut off mid-arguments is no call.
   if (finishReason === "length") return "max_tokens";
+  if (toolCallCount > 0) return "tool_use";
   if (finishReason === "tool_calls" || finishReason === "function_call") return null;
   return "end_turn";
 }
 
 /** Thrown when a whole reply did not finish, so the chain tries the next tier. */
-export function unfinishedReplyError(label: string, finishReason: string | null | undefined): Error {
+export function unfinishedReplyError(
+  label: string,
+  finishReason: string | null | undefined,
+): Error {
   return new Error(
     `${label} did not finish its reply (${finishReason ?? "no finish reason"}). ` +
       "Falling through to next tier.",
@@ -578,11 +586,16 @@ export function extractWorkersAiDelta(jsonPayload: string): {
   try {
     const obj = JSON.parse(jsonPayload) as {
       response?: unknown;
-      choices?: Array<{ delta?: { content?: unknown }; finish_reason?: unknown }>;
+      choices?: Array<{
+        delta?: { content?: unknown };
+        finish_reason?: unknown;
+      }>;
     };
     const reason = obj.choices?.[0]?.finish_reason;
     const finishReason = typeof reason === "string" ? reason : undefined;
-    if (typeof obj.response === "string") return { text: obj.response, finishReason };
+    if (typeof obj.response === "string") {
+      return { text: obj.response, finishReason };
+    }
     const content = obj.choices?.[0]?.delta?.content;
     return { text: typeof content === "string" ? content : null, finishReason };
   } catch {

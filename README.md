@@ -119,8 +119,8 @@ abort signal) when the limit runs out, and the chain moves to the next tier.
 | Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
 
 For a stream the limit covers the wait for the response to start; once it
-has started it is never cut. A Gemini request that offers tools is read
-whole first (see Limitations), so its limit covers the whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
+has started it is never cut. A stream that is read whole first (see
+Limitations) has its limit cover the whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
 were measured on prompts under 10K tokens); only the chain budget bounds it.
 
 ## Private callers
@@ -302,17 +302,19 @@ GATEWAY_TOKEN=... npm run replay -- --mode pinned --tiers gemini,openrouter
 - `count_tokens` and `batches` endpoints are Anthropic-specific —
   they only work if Anthropic is configured. Most consumer apps don't
   use them.
-- Streaming for Workers AI and Gemini calls that offer tools, and for any
-  call with `fortune_require_tools`, is *synthesized* from a buffered
-  non-streamed call. The wire shape is correct Anthropic SSE but the deltas
+- Streaming for Workers AI and Gemini calls that offer tools, for any
+  call with `fortune_require_tools`, and for a structured (`output_config`)
+  or cacheable call, is *synthesized* from a buffered non-streamed call. The wire shape is correct Anthropic SSE but the deltas
   arrive in one burst rather than truly token-by-token. The reply is read
   whole so one the model did not finish (a botched Gemini tool call ends
-  `MALFORMED_FUNCTION_CALL` with no call) can fail the tier and let the next
-  one answer, instead of reaching the caller as a normal end.
+  `MALFORMED_FUNCTION_CALL` with no call), a blank one, or one off its
+  schema can fail the tier and let the next one answer, instead of reaching
+  the caller as a normal end.
 - A reply a free tier did not finish fails that tier: a finish reason other
   than a normal stop, a length cut-off or a tool call (for example
-  `content_filter`, or OpenRouter's `error`), or a promised tool call that
-  never came. A reply already streaming when that happens ends on an error
+  `content_filter`, OpenRouter's `error`, or Mistral's `model_length`), or
+  a promised tool call that never came. A tool call cut off by the length
+  limit reports `max_tokens`, not `tool_use`. A reply already streaming when that happens ends on an error
   event the caller can retry, since no other tier can take over mid-stream.
 
 ## License

@@ -175,7 +175,11 @@ export async function callOpenAICompatible(
   if (parsed.error) {
     throw new Error(`${config.label} error: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
   }
-  const anthropicShape = openAIToAnthropicMessage(parsed, req.model || config.model, config.label);
+  const anthropicShape = openAIToAnthropicMessage(
+    parsed,
+    req.model || config.model,
+    config.label,
+  );
 
   // Tool-silence detection. Matches the same opt-in semantics workers-ai
   // and gemini use: callers that require a tool call set
@@ -217,7 +221,9 @@ export function openAIToAnthropicMessage(
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   const stopReason = openAIStopReason(choice?.finish_reason, validToolCalls.length);
-  if (stopReason === null) throw unfinishedReplyError(providerLabel, choice?.finish_reason);
+  if (stopReason === null) {
+    throw unfinishedReplyError(providerLabel, choice?.finish_reason);
+  }
 
   return {
     id: resp.id ?? `msg_oai_${randomId()}`,

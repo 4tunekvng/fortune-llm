@@ -114,12 +114,18 @@ describe("openAIToAnthropicMessage", () => {
 });
 
 describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
+  const replyEnding = (content: string | null, finish: string) => ({
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant" as const, content },
+        finish_reason: finish,
+      },
+    ],
+  });
+
   it("throws when the provider filtered the reply", () => {
-    const resp = {
-      choices: [
-        { index: 0, message: { role: "assistant" as const, content: "Let me" }, finish_reason: "content_filter" },
-      ],
-    };
+    const resp = replyEnding("Let me", "content_filter");
 
     expect(() => openAIToAnthropicMessage(resp, "m", "OpenRouter")).toThrow(
       /OpenRouter did not finish its reply \(content_filter\)/,
@@ -127,19 +133,49 @@ describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
   });
 
   it("throws when it promised a tool call and sent none", () => {
+    const resp = replyEnding("", "tool_calls");
+
+    expect(() => openAIToAnthropicMessage(resp, "m", "Groq")).toThrow(
+      /did not finish/,
+    );
+  });
+
+  it("reports a tool call cut off by the length limit as max_tokens", () => {
     const resp = {
       choices: [
-        { index: 0, message: { role: "assistant" as const, content: "" }, finish_reason: "tool_calls" },
+        {
+          index: 0,
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [
+              {
+                id: "c1",
+                type: "function" as const,
+                function: { name: "search", arguments: '{"q":"wea' },
+              },
+            ],
+          },
+          finish_reason: "length",
+        },
       ],
     };
 
-    expect(() => openAIToAnthropicMessage(resp, "m", "Groq")).toThrow(/did not finish/);
+    const out = openAIToAnthropicMessage(resp, "m", "Groq");
+
+    expect(out.stop_reason).toBe("max_tokens");
   });
 
   it("still ends the turn when the provider sends no finish reason", () => {
-    const resp = { choices: [{ index: 0, message: { role: "assistant" as const, content: "hi" } }] };
+    const resp = {
+      choices: [
+        { index: 0, message: { role: "assistant" as const, content: "hi" } },
+      ],
+    };
 
-    expect(openAIToAnthropicMessage(resp, "m", "Groq").stop_reason).toBe("end_turn");
+    const out = openAIToAnthropicMessage(resp, "m", "Groq");
+
+    expect(out.stop_reason).toBe("end_turn");
   });
 });
 
@@ -302,7 +338,13 @@ describe("callOpenAICompatible", () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          choices: [{ index: 0, message: { role: "assistant", content: "half" }, finish_reason: "error" }],
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "half" },
+              finish_reason: "error",
+            },
+          ],
         }),
         { status: 200 },
       ),
@@ -316,7 +358,7 @@ describe("callOpenAICompatible", () => {
     await expect(call).rejects.toThrow(/did not finish its reply \(error\)/);
   });
 
-  it("streams the checked reply back when the caller asked for a stream and a tool call", async () => {
+  it("streams a checked reply to a stream caller that needs a tool", async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -326,7 +368,13 @@ describe("callOpenAICompatible", () => {
               message: {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: '{"q":"a"}' } }],
+                tool_calls: [
+                  {
+                    id: "call_1",
+                    type: "function",
+                    function: { name: "search", arguments: '{"q":"a"}' },
+                  },
+                ],
               },
               finish_reason: "tool_calls",
             },
@@ -402,7 +450,7 @@ describe("streamOpenAIAsAnthropic", () => {
       },
     });
 
-  it("ends on an error, not a clean stop, when the provider cuts the reply off", async () => {
+  it("ends on an error, not a clean stop, when the reply is cut off", async () => {
     const upstream = upstreamOf([
       'data: {"choices":[{"index":0,"delta":{"content":"Let me run"}}]}',
       'data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}',
@@ -418,7 +466,8 @@ describe("streamOpenAIAsAnthropic", () => {
 
   it("ends on an error when it promised a tool call and streamed none", async () => {
     const upstream = upstreamOf([
-      'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"tool_calls"}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"},' +
+        '"finish_reason":"tool_calls"}]}',
       "data: [DONE]",
     ]);
 

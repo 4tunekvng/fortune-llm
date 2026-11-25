@@ -361,10 +361,12 @@ describe("workersAiToAnthropicMessage on a reply the model did not finish", () =
     messages: [{ role: "user", content: "hi" }],
   });
 
+  const replyEnding = (content: string, finish: string) => ({
+    choices: [{ message: { role: "assistant", content }, finish_reason: finish }],
+  });
+
   it("throws on an unknown finish reason so the next tier answers", () => {
-    const result = {
-      choices: [{ message: { role: "assistant", content: "half" }, finish_reason: "content_filter" }],
-    };
+    const result = replyEnding("half", "content_filter");
 
     expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(
       /Workers AI did not finish its reply \(content_filter\)/,
@@ -372,9 +374,11 @@ describe("workersAiToAnthropicMessage on a reply the model did not finish", () =
   });
 
   it("throws when it promised a tool call and sent none", () => {
-    const result = { choices: [{ message: { role: "assistant", content: "" }, finish_reason: "tool_calls" }] };
+    const result = replyEnding("", "tool_calls");
 
-    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(/did not finish/);
+    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(
+      /did not finish/,
+    );
   });
 });
 
@@ -387,18 +391,31 @@ describe("callWorkersAi with tools", () => {
     tools: [{ name: "search", input_schema: { type: "object" } }],
   };
   const aiReturning = (result: unknown) => ({ run: async () => result });
+  const replyEnding = (content: string, finish: string) => ({
+    choices: [{ message: { role: "assistant", content }, finish_reason: finish }],
+  });
 
   it("throws on a cut-off reply before anything is streamed", async () => {
-    const ai = aiReturning({
-      choices: [{ message: { role: "assistant", content: "half" }, finish_reason: "content_filter" }],
-    });
+    const ai = aiReturning(replyEnding("half", "content_filter"));
 
     await expect(callWorkersAi(ai, "m", toolReq)).rejects.toThrow(/did not finish/);
   });
 
+  it("throws on a blank reply before anything is streamed", async () => {
+    const ai = aiReturning(replyEnding("", "stop"));
+
+    await expect(callWorkersAi(ai, "m", toolReq)).rejects.toThrow(/empty reply/);
+  });
+
   it("streams a finished tool call back as tool_use", async () => {
     const ai = aiReturning({
-      tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: '{"q":"a"}' } }],
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "search", arguments: '{"q":"a"}' },
+        },
+      ],
     });
 
     const text = await (await callWorkersAi(ai, "m", toolReq)).text();
@@ -557,7 +574,8 @@ describe("streamWorkersAiAsAnthropic", () => {
   it("ends on an error when a Gemma 4 stream is cut off", async () => {
     const upstream = upstreamOf([
       'data: {"choices":[{"index":0,"delta":{"content":"Let me"}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{},' +
+        '"finish_reason":"content_filter"}]}\n\n',
       "data: [DONE]\n\n",
     ]);
 
@@ -569,7 +587,8 @@ describe("streamWorkersAiAsAnthropic", () => {
 
   it("reports a stream that ran out of tokens as max_tokens", async () => {
     const upstream = upstreamOf([
-      'data: {"choices":[{"index":0,"delta":{"content":"long"},"finish_reason":"length"}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"content":"long"},' +
+        '"finish_reason":"length"}]}\n\n',
       "data: [DONE]\n\n",
     ]);
 
