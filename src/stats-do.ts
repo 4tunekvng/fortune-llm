@@ -273,7 +273,9 @@ export class StatsDO extends DurableObject {
 
     // Build per-consumer breakdown: start with empty stats for every
     // consumer we've seen today, then populate from both tables.
-    const per_consumer: Record<string, ConsumerStats> = {};
+    // No prototype: an app named "constructor" or "__proto__" would
+    // otherwise find Object's own member here and break the whole day.
+    const per_consumer: Record<string, ConsumerStats> = Object.create(null);
     const ensure = (name: string): ConsumerStats => {
       let slot = per_consumer[name];
       if (!slot) {
