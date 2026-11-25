@@ -944,6 +944,20 @@ function chainExhaustedResponse(
 }
 
 /**
+ * The Anthropic endpoints besides /v1/messages that the gateway forwards,
+ * in the exact spellings Anthropic serves. Anything else under /v1/ is a
+ * 404, so no other spelling of /v1/messages (`/v1/m%65ssages`,
+ * `/v1/MESSAGES`) can skip the free chain and reach paid Anthropic
+ * (fortune-llm#61). No app called any other endpoint through the gateway
+ * when this list was written (2026-11-25).
+ */
+const ANTHROPIC_ONLY_PATHS: readonly RegExp[] = [
+  /^\/v1\/messages\/count_tokens$/,
+  /^\/v1\/messages\/batches(\/[A-Za-z0-9_-]+(\/(results|cancel))?)?$/,
+  /^\/v1\/models(\/[A-Za-z0-9._-]+)?$/,
+];
+
+/**
  * Non-messages endpoints (count_tokens, batches, etc.) are Anthropic-
  * specific and don't translate cleanly. Only forward when Anthropic is
  * configured; otherwise reject so callers see the policy clearly.
@@ -955,6 +969,13 @@ async function handleAnthropicOnly(
   dev: boolean,
   env: Env,
 ): Promise<Response> {
+  if (!ANTHROPIC_ONLY_PATHS.some((p) => p.test(url.pathname))) {
+    return jsonError(
+      404,
+      "not_found",
+      `No route for ${request.method} ${url.pathname}`,
+    );
+  }
   if (dev) return devTokenPaidRefusal();
   if (!env.ANTHROPIC_API_KEY) {
     return jsonError(
