@@ -599,8 +599,19 @@ export async function callGeminiModels(
   throw final instanceof Error ? final : new Error("No Gemini model configured");
 }
 
-/** The model list: the default first, then the fallbacks (comma-separated), no repeats. */
-export function resolveGeminiModels(primary: string, fallbacks: string | undefined): string[] {
+/** The caller asked for one Gemini model by name (request `model`). */
+export const namesGeminiModel = (model: string | undefined): model is string =>
+  Boolean(model?.startsWith("gemini-"));
+
+/** The model list: the default first, then the fallbacks (comma-separated), no
+ *  repeats. A caller that names a Gemini model gets only that one, so an eval
+ *  can test the lite model without spending the main model's small daily quota. */
+export function resolveGeminiModels(
+  primary: string,
+  fallbacks: string | undefined,
+  requested?: string,
+): string[] {
+  if (namesGeminiModel(requested)) return [requested];
   const rest = (fallbacks ?? DEFAULT_GEMINI_FALLBACK_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
   return [...new Set([primary, ...rest])];
 }

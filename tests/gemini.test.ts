@@ -1252,4 +1252,12 @@ describe("resolveGeminiModels", () => {
     expect(resolveGeminiModels("gemini-2.5-flash", " gemini-2.5-flash , gemini-2.0-flash ")).toEqual(["gemini-2.5-flash", "gemini-2.0-flash"]);
     expect(resolveGeminiModels("gemini-2.5-flash", "")).toEqual(["gemini-2.5-flash"]);
   });
+
+  it("uses only the Gemini model a caller names", () => {
+    expect(resolveGeminiModels("gemini-2.5-flash", undefined, "gemini-flash-lite-latest")).toEqual(["gemini-flash-lite-latest"]);
+  });
+
+  it("ignores a requested model that isn't Gemini's", () => {
+    expect(resolveGeminiModels("gemini-2.5-flash", "", "claude-sonnet-4-6")).toEqual(["gemini-2.5-flash"]);
+  });
 });

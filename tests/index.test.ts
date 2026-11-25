@@ -260,6 +260,43 @@ describe("fetch handler with a structured request", () => {
     expect(store.has("circuit:groq")).toBe(false);
   });
 
+  it.each([
+    ["gemini-flash-lite-latest", false],
+    ["claude-sonnet-5-5", true],
+  ])("a Gemini quota error with model %s shuts Gemini: %s", async (model, shut) => {
+    // Arrange: every Gemini model answers 429 (quota spent).
+    const store = new Map<string, string>();
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        max_tokens: 64,
+        metadata: { fortune_route: "gemini" },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const quota = { error: { code: 429, message: "Quota exceeded", status: "RESOURCE_EXHAUSTED" } };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(quota, { status: 429 })));
+    const env = {
+      GATEWAY_TOKEN: "gateway-token",
+      GEMINI_API_KEY: "gemini-test-key",
+      CACHE_TTL_SECONDS: "0",
+      RATE_LIMIT_PER_MIN: "0",
+      CIRCUIT: kv,
+    };
+
+    // Act
+    await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(store.has("circuit:gemini")).toBe(shut);
+  });
+
   it("keeps a reply that only calls a tool", async () => {
     // Arrange: the SDK leaves parsed_output null for a tool-only reply and
     // does not throw, so the gateway must pass it on.
