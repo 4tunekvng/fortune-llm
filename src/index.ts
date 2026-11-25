@@ -31,7 +31,7 @@ import {
   resolveGeminiModels,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_FALLBACK_MODELS,
-  namesGeminiModel,
+  pinnedGeminiModel,
   resolveGeminiKeys,
 } from "./gemini.js";
 import { callGroq, DEFAULT_GROQ_MODEL } from "./groq.js";
@@ -858,7 +858,8 @@ async function tripOnQuota(
   // disable this tier for all other users on the shared gateway pool.
   if (request.headers.get(`x-fortune-byok-${tier}`)) return;
   // Nor may one Gemini model a caller pinned by name: the others still answer.
-  if (tier === "gemini" && namesGeminiModel(parsed.model)) return;
+  const geminiDefault = env.DEFAULT_GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+  if (tier === "gemini" && pinnedGeminiModel(geminiDefault, env.GEMINI_FALLBACK_MODELS, parsed.model)) return;
   // A timeout belongs to this one request (time-limit.ts), never the tier.
   const ms = err instanceof TierTimeoutError ? 0 : tripMsFor(err, tripDurationMs);
   if (ms > 0) await tripCircuit(tier, env.CIRCUIT, ms, msg);

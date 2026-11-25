@@ -281,7 +281,8 @@ describe("fetch handler with a structured request", () => {
       }),
     });
     const quota = { error: { code: 429, message: "Quota exceeded", status: "RESOURCE_EXHAUSTED" } };
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(quota, { status: 429 })));
+    const fetched = vi.fn(async (_url: unknown) => Response.json(quota, { status: 429 }));
+    vi.stubGlobal("fetch", fetched);
     const env = {
       GATEWAY_TOKEN: "gateway-token",
       GEMINI_API_KEY: "gemini-test-key",
@@ -295,6 +296,25 @@ describe("fetch handler with a structured request", () => {
 
     // Assert
     expect(store.has("circuit:gemini")).toBe(shut);
+    const models = fetched.mock.calls.map(([url]) => String(url).match(/models\/([^:]+):/)?.[1]);
+    expect(new Set(models)).toEqual(new Set(shut ? ["gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-flash-latest"] : [model]));
+  });
+
+  it("answers a request whose model isn't text", async () => {
+    // Arrange
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "gateway-token", "content-type": "application/json" },
+      body: JSON.stringify({ model: 123, max_tokens: 64, messages: [{ role: "user", content: "hi" }] }),
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { code: 429, message: "Quota exceeded" } }, { status: 429 })));
+    const env = { GATEWAY_TOKEN: "gateway-token", GEMINI_API_KEY: "k", CACHE_TTL_SECONDS: "0", RATE_LIMIT_PER_MIN: "0", AI: { run: async () => ({ response: "hello" }) } };
+
+    // Act
+    const resp = await worker.fetch(req, env as never, ctx as never);
+
+    // Assert
+    expect(resp.status).toBe(200);
   });
 
   it("keeps a reply that only calls a tool", async () => {

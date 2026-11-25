@@ -599,21 +599,32 @@ export async function callGeminiModels(
   throw final instanceof Error ? final : new Error("No Gemini model configured");
 }
 
-/** The caller asked for one Gemini model by name (request `model`). */
-export const namesGeminiModel = (model: string | undefined): model is string =>
-  Boolean(model?.startsWith("gemini-"));
+/** The default first, then the fallbacks (comma-separated), no repeats. */
+function configuredGeminiModels(primary: string, fallbacks: string | undefined): string[] {
+  const rest = (fallbacks ?? DEFAULT_GEMINI_FALLBACK_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
+  return [...new Set([primary, ...rest])];
+}
 
-/** The model list: the default first, then the fallbacks (comma-separated), no
- *  repeats. A caller that names a Gemini model gets only that one, so an eval
- *  can test the lite model without spending the main model's small daily quota. */
+/** The one configured model a caller named in `model`, or null. Only models
+ *  the gateway already uses can be pinned, so no caller can pick a costlier
+ *  one. Lets an eval test the lite model without spending flash's day. */
+export function pinnedGeminiModel(
+  primary: string,
+  fallbacks: string | undefined,
+  requested: unknown,
+): string | null {
+  if (typeof requested !== "string") return null;
+  return configuredGeminiModels(primary, fallbacks).includes(requested) ? requested : null;
+}
+
+/** The models to try in order: only the pinned one, else every configured one. */
 export function resolveGeminiModels(
   primary: string,
   fallbacks: string | undefined,
-  requested?: string,
+  requested?: unknown,
 ): string[] {
-  if (namesGeminiModel(requested)) return [requested];
-  const rest = (fallbacks ?? DEFAULT_GEMINI_FALLBACK_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
-  return [...new Set([primary, ...rest])];
+  const pinned = pinnedGeminiModel(primary, fallbacks, requested);
+  return pinned ? [pinned] : configuredGeminiModels(primary, fallbacks);
 }
 
 function shuffleKeys<T>(arr: T[]): T[] {
