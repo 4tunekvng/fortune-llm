@@ -36,6 +36,7 @@ import {
   parseSseDataLine,
   readSseFrames,
   randomId,
+  keepAliveWriter,
   sseEventWriter,
   saysSomething,
   sseResponse,
@@ -500,7 +501,7 @@ export function streamWorkersAiAsAnthropic(
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = sseEventWriter(controller);
+      const { writeEvent, sawFrame } = keepAliveWriter(sseEventWriter(controller));
 
       writeEvent("message_start", messageStartEvent(messageId, modelLabel));
       writeEvent("content_block_start", {
@@ -529,7 +530,10 @@ export function streamWorkersAiAsAnthropic(
         });
       };
       try {
-        await readSseFrames(upstream, processFrame);
+        await readSseFrames(upstream, (frame) => {
+          processFrame(frame);
+          sawFrame();
+        });
       } catch (err) {
         streamError = true;
         console.error("fortune-llm: Workers AI stream failed:", err);

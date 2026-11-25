@@ -475,6 +475,29 @@ describe("streamOpenAIAsAnthropic", () => {
     expect(text).not.toContain("message_stop");
   });
 
+  it("sends a ping while the provider streams only reasoning", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const frames = [
+      'data: {"choices":[{"index":0,"delta":{"reasoning":"thinking"}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"},' +
+        '"finish_reason":"stop"}]}\n\n',
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const frame = frames.shift();
+        if (!frame) return controller.close();
+        vi.setSystemTime(Date.now() + 1_500);
+        controller.enqueue(new TextEncoder().encode(frame));
+      },
+    });
+
+    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+    vi.useRealTimers();
+
+    expect(text).toContain("event: ping");
+    expect(text.indexOf("event: ping")).toBeLessThan(text.indexOf('"text":"ok"'));
+  });
+
   it("ends on an error when it promised a tool call and streamed none", async () => {
     const upstream = upstreamOf([
       'data: {"choices":[{"index":0,"delta":{"content":"ok"},' +

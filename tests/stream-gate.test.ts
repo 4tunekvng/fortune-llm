@@ -55,6 +55,14 @@ describe("holdUntilFirstWords", () => {
     expect(stopped).toEqual(["stopped"]);
   });
 
+  it("falls through when an error follows words in the same read", async () => {
+    const upstream = streamOf([start + words("Let me") + failed]);
+
+    const held = holdUntilFirstWords(upstream, "groq", opts());
+
+    await expect(held).rejects.toThrow(/failed before its words were sent: boom/);
+  });
+
   it("fails the tier when the stream ends before its first words", async () => {
     const held = holdUntilFirstWords(streamOf([start]), "groq", opts());
 

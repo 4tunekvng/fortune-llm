@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  keepAliveWriter,
   parseSseDataLine,
   readSseFrames,
   splitSseFrames,
@@ -201,4 +202,33 @@ describe("readSseFrames", () => {
 
       expect(frames).toEqual(["data: a", "data: bc", "data: tail"]);
     });
+});
+
+describe("keepAliveWriter", () => {
+  it("sends a ping when a frame writes nothing for a while", () => {
+    let clock = 0;
+    const sent: string[] = [];
+    const { sawFrame } = keepAliveWriter((e) => sent.push(e), 1_000, () => clock);
+
+    clock = 1_500;
+    sawFrame();
+
+    expect(sent).toEqual(["ping"]);
+  });
+
+  it("sends no ping when the frame just wrote an event", () => {
+    let clock = 0;
+    const sent: string[] = [];
+    const { writeEvent, sawFrame } = keepAliveWriter(
+      (e) => sent.push(e),
+      1_000,
+      () => clock,
+    );
+
+    clock = 1_500;
+    writeEvent("content_block_delta", {});
+    sawFrame();
+
+    expect(sent).toEqual(["content_block_delta"]);
+  });
 });

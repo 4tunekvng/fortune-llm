@@ -100,9 +100,10 @@ export async function holdUntilFirstWords(
       for (const frame of frames) {
         const seen = frameKind(frame);
         if (seen.kind === "error") {
-          throw new Error(
-            `${label} stream failed before its first words: ${seen.message}`,
-          );
+          const when = spoke
+            ? "before its words were sent"
+            : "before its first words";
+          throw new Error(`${label} stream failed ${when}: ${seen.message}`);
         }
         if (seen.kind === "words") spoke = true;
         if (seen.kind === "stop" && !spoke) {

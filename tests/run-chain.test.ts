@@ -488,4 +488,76 @@ describe("runChain through the fetch handler", () => {
     expect(resp.headers.get("x-fortune-llm-prior-errors")).toContain("groq");
     expect(await resp.text()).toContain("hello from workers ai");
   });
+
+  it("cuts a stream that goes quiet after its words and stops groq", async () => {
+    // Arrange
+    const signals: AbortSignal[] = [];
+    const words = 'data: {"choices":[{"index":0,"delta":{"content":"Let me"}}]}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        signals.push(init.signal as AbortSignal);
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(words));
+          },
+        });
+        const headers = { "content-type": "text/event-stream" };
+        return new Response(body, { headers });
+      }),
+    );
+    const env = makeEnv(new MapKv(), {
+      CACHE_TTL_SECONDS: "0",
+      STREAM_IDLE_MS: "50",
+    });
+
+    // Act
+    const resp = await worker.fetch(
+      messagesRequest({ stream: true }),
+      env as never,
+      ctx as never,
+    );
+    const text = await resp.text();
+
+    // Assert
+    expect(text).toContain("Let me");
+    expect(text).toContain("groq went quiet for 50 ms");
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it("moves on when groq's stream says nothing within its time limit", async () => {
+    // Arrange
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        signals.push(init.signal as AbortSignal);
+        const body = new ReadableStream<Uint8Array>({ start() {} });
+        const headers = { "content-type": "text/event-stream" };
+        return new Response(body, { headers });
+      }),
+    );
+    const workersAiStream = () =>
+      new Response(
+        'data: {"response":"hello from workers ai"}\n\ndata: [DONE]\n\n',
+      ).body;
+    const env = makeEnv(new MapKv(), {
+      CACHE_TTL_SECONDS: "0",
+      TIER_TIME_LIMIT_MS_GROQ: "50",
+      AI: { run: async () => workersAiStream() },
+    });
+
+    // Act
+    const resp = await worker.fetch(
+      messagesRequest({ stream: true }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toContain("timed out");
+    expect(await resp.text()).toContain("hello from workers ai");
+    expect(signals[0]?.aborted).toBe(true);
+  });
 });

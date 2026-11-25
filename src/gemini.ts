@@ -32,6 +32,7 @@ import {
   parseSseDataLine,
   readSseFrames,
   randomId,
+  keepAliveWriter,
   sseEventWriter,
   sseResponse,
   saysSomething,
@@ -776,7 +777,7 @@ export function streamGeminiAsAnthropic(
 
   const downstream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writeEvent = sseEventWriter(controller);
+      const { writeEvent, sawFrame } = keepAliveWriter(sseEventWriter(controller));
 
       writeEvent("message_start", messageStartEvent(messageId, modelLabel));
 
@@ -815,7 +816,10 @@ export function streamGeminiAsAnthropic(
       };
 
       try {
-        await readSseFrames(upstream, processFrame);
+        await readSseFrames(upstream, (frame) => {
+          processFrame(frame);
+          sawFrame();
+        });
       } catch {
         streamError = true;
         writeEvent("error", {
