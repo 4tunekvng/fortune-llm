@@ -205,6 +205,7 @@ The answer is `503` with a body apps can show as is:
 | Method | Path | Behavior |
 |--------|------|----------|
 | GET | `/healthz` | Liveness; reports default OSS + Gemini models and which backends are configured. |
+| GET | `/stats` | Today's (UTC) requests and per-tier results, split by app (needs the gateway token). An app names itself with `x-fortune-consumer: <app>`; a request without it is named `unknown-<guess>` from what it carries: `unknown-claude-code`, `unknown-worker-<site>` for a Worker, else its SDK language or user agent. |
 | POST | `/v1/messages` | Routes per the diagram above. |
 | `*` | `/v1/*` | Other Anthropic endpoints (count_tokens, batches) are forwarded **only** if `ANTHROPIC_API_KEY` is configured. Otherwise 501. |
 | OPTIONS | any | CORS preflight. |

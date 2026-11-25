@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 
-import worker from "../src/index.js";
+import worker, { unlabelledConsumer } from "../src/index.js";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
@@ -826,6 +826,38 @@ describe("fetch handler routing before the chain", () => {
     );
   });
 
+  it("names a request with no app label by the site of the Worker sending it", async () => {
+    // Arrange
+    const recordEvents = vi.fn(async () => {});
+    const statsEnv = {
+      ...env,
+      STATS_DO: { idFromName: () => "id", get: () => ({ recordEvents }) },
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": "gateway-token",
+        "user-agent": "Anthropic/JS 1.10.0",
+        "x-stainless-lang": "js",
+        "cf-worker": "fortuneking.dev",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    // Act
+    await worker.fetch(req, statsEnv as never, ctx as never);
+
+    // Assert
+    expect(recordEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      "unknown-worker-fortuneking-dev",
+    );
+  });
+
   it("labels development-token stats apart from the app they name", async () => {
     // Arrange
     const recordEvents = vi.fn(async () => {});
@@ -887,5 +919,39 @@ describe("fetch handler routing before the chain", () => {
     // Assert
     expect(resp.status).toBe(429);
     expect(resp.headers.get("x-fortune-llm-rate-scope")).toBe("ip:5.6.7.8");
+  });
+});
+
+describe("unlabelledConsumer", () => {
+  it("names Claude Code by its user agent, wherever it runs", () => {
+    const headers = new Headers({ "user-agent": "claude-cli/2.1.3 (external, sdk-cli)" });
+
+    expect(unlabelledConsumer(headers)).toBe("unknown-claude-code");
+  });
+
+  it("names a script by its SDK language when no Worker sent it", () => {
+    const headers = new Headers({
+      "user-agent": "Anthropic/Python 0.75.0",
+      "x-stainless-lang": "python",
+    });
+
+    expect(unlabelledConsumer(headers)).toBe("unknown-python");
+  });
+
+  it("falls back to the first word of the user agent", () => {
+    const headers = new Headers({ "user-agent": "curl/8.7.1" });
+
+    expect(unlabelledConsumer(headers)).toBe("unknown-curl");
+  });
+
+  it("keeps a long site name inside the 32-character stats label", () => {
+    const headers = new Headers({ "cf-worker": "a-very-long-subdomain.example.workers.dev" });
+
+    expect(unlabelledConsumer(headers)).toMatch(/^unknown-worker-[a-z0-9_-]+$/);
+    expect(unlabelledConsumer(headers).length).toBeLessThanOrEqual(32);
+  });
+
+  it("stays plain unknown when the request carries nothing to go on", () => {
+    expect(unlabelledConsumer(new Headers())).toBe("unknown");
   });
 });

@@ -209,9 +209,34 @@ function statsFlusher(
  * the development token so local runs and evals never count as the
  * production app they name.
  */
-function statsConsumer(request: Request, dev: boolean): string | null {
-  const name = request.headers.get("x-fortune-consumer");
-  return name && dev ? `dev-${name}`.slice(0, 32) : name;
+function statsConsumer(request: Request, dev: boolean): string {
+  const name =
+    request.headers.get("x-fortune-consumer") ??
+    unlabelledConsumer(request.headers);
+  return dev ? `dev-${name}`.slice(0, 32) : name;
+}
+
+/**
+ * A /stats label for a request that names no app, taken from what it carries
+ * anyway: Claude Code's user agent, the site a calling Worker runs on
+ * (Cloudflare's `cf-worker` header), or the SDK's language. Most traffic once
+ * landed in one "unknown" bucket, so nobody could see what spent the free
+ * tiers (fortune-llm#53). The "unknown-" start marks it as a guess, and the
+ * result keeps to the stats rule: at most 32 of a-z, 0-9, "-" and "_".
+ */
+export function unlabelledConsumer(headers: Headers): string {
+  const agent = headers.get("user-agent") ?? "";
+  const site = headers.get("cf-worker");
+  const who = /^claude-cli\//i.test(agent)
+    ? "claude-code"
+    : site
+      ? `worker-${site}`
+      : (headers.get("x-stainless-lang") ?? agent.split(/[/\s]/)[0] ?? "");
+  const slug = who
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug ? `unknown-${slug}`.slice(0, 32) : "unknown";
 }
 
 function warnIfCircuitMissing(env: Env): void {
