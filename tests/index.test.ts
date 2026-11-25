@@ -883,6 +883,35 @@ describe("fetch handler routing before the chain", () => {
     expect(recordEvents).toHaveBeenCalledWith(expect.anything(), "dev-knox");
   });
 
+  it("guesses a development-token label when no app is named", async () => {
+    // Arrange
+    const recordEvents = vi.fn(async () => {});
+    const statsEnv = {
+      ...env,
+      GATEWAY_DEV_TOKEN: "dev-token",
+      STATS_DO: { idFromName: () => "id", get: () => ({ recordEvents }) },
+    };
+    const req = new Request("https://gw.test/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": "dev-token",
+        "x-fortune-consumer": "",
+        "user-agent": "curl/8.7.1",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+
+    // Act
+    await worker.fetch(req, statsEnv as never, ctx as never);
+
+    // Assert
+    expect(recordEvents).toHaveBeenCalledWith(expect.anything(), "dev-unknown-curl");
+  });
+
   it("rate-limits the development token by IP when it names an app", async () => {
     // Arrange: knox is registered with room to spare; the IP bucket is full.
     const store = new Map<string, string>([
@@ -924,7 +953,10 @@ describe("fetch handler routing before the chain", () => {
 
 describe("unlabelledConsumer", () => {
   it("names Claude Code by its user agent, wherever it runs", () => {
-    const headers = new Headers({ "user-agent": "claude-cli/2.1.3 (external, sdk-cli)" });
+    const headers = new Headers({
+      "user-agent": "claude-cli/2.1.3 (external, sdk-cli)",
+      "cf-worker": "fortuneking.dev",
+    });
 
     expect(unlabelledConsumer(headers)).toBe("unknown-claude-code");
   });
