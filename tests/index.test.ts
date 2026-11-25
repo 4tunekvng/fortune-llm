@@ -798,6 +798,22 @@ describe("fetch handler routing before the chain", () => {
     expect(sent.requests[0].params.max_tokens).toBe(65536);
   });
 
+  it("refuses a batch body it cannot read instead of sending it", async () => {
+    const upstream = vi.fn(async () => Response.json({}));
+    vi.stubGlobal("fetch", upstream);
+    const body =
+      '{"requests":[{"custom_id":"a","params":{"max_tokens":128000,"x":NaN}}]}';
+
+    const resp = await call(
+      "/v1/messages/batches",
+      { method: "POST", headers: { "x-api-key": "gateway-token" }, body },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+
+    expect(resp.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
   it("answers 502 when the Anthropic forward throws", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
 
