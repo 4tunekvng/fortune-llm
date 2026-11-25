@@ -22,8 +22,8 @@
  *   per_tier(date, tier, ok, fail)
  *     gateway-wide per-tier rollups for each upstream.
  *   per_consumer(date, consumer, metric, count)
- *     same rollups but split by `x-fortune-consumer` header (or
- *     "unknown" when absent). Lets us see WHICH apps drive WHICH
+ *     same rollups but split by the app label (`x-fortune-consumer`,
+ *     or the gateway's guess from other headers when absent). Lets us see WHICH apps drive WHICH
  *     traffic patterns.
  *   per_consumer_tier(date, consumer, tier, ok, fail)
  *     per-consumer × per-tier breakdown — the table that answers
@@ -162,9 +162,8 @@ export class StatsDO extends DurableObject {
    * (gateway-wide) AND `per_consumer` (scoped). Each tier event lands
    * in both `per_tier` AND `per_consumer_tier`.
    *
-   * `consumer` should be the value of the `x-fortune-consumer` header
-   * if the caller sent one; pass null/undefined for unscoped requests
-   * (they bucket as "unknown"). The DO sanitizes/normalizes the name
+   * `consumer` is the request's app label (index.ts `statsConsumer`);
+   * null/undefined buckets as "unknown". The DO sanitizes/normalizes the name
    * defensively in case callers send something invalid.
    *
    * Same-batch events are tallied in-memory first, then flushed in a

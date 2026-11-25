@@ -183,14 +183,14 @@ function cacheStub(env: Env): CacheDOStub | null {
  * Stats events accumulate over the lifetime of a request and are flushed
  * to the StatsDO via ctx.waitUntil so the write doesn't add latency to the
  * response path. The DO serializes increments through a single actor — no
- * read-modify-write races, no KV cache lag. The consumer header is captured
- * once at request entry so every event lands in the same per-consumer
- * bucket even if the header is removed or rewritten mid-flow.
+ * read-modify-write races, no KV cache lag. The app label is worked out
+ * once at request entry so every event lands in the same per-app bucket
+ * even if the header is removed or rewritten mid-flow.
  */
 function statsFlusher(
   env: Env,
   ctx: ExecutionContext,
-  consumerHeader: string | null,
+  consumer: string,
   statsEvents: StatsEvent[],
 ): () => void {
   return () => {
@@ -198,20 +198,46 @@ function statsFlusher(
     const stub = statsStub(env);
     if (stub) {
       const batch = statsEvents.slice();
-      ctx.waitUntil(stub.recordEvents(batch, consumerHeader));
+      ctx.waitUntil(stub.recordEvents(batch, consumer));
     }
     statsEvents.length = 0;
   };
 }
 
 /**
- * The /stats label for a request: the consumer header, marked `dev-` for
- * the development token so local runs and evals never count as the
- * production app they name.
+ * The /stats label for a request: the app it names in `x-fortune-consumer`,
+ * else a guess from its other headers, marked `dev-` for the development
+ * token so local runs and evals never count as the production app.
  */
-function statsConsumer(request: Request, dev: boolean): string | null {
-  const name = request.headers.get("x-fortune-consumer");
-  return name && dev ? `dev-${name}`.slice(0, 32) : name;
+function statsConsumer(request: Request, dev: boolean): string {
+  const name =
+    request.headers.get("x-fortune-consumer")?.trim() ||
+    unlabelledConsumer(request.headers);
+  return dev ? `dev-${name}`.slice(0, 32) : name;
+}
+
+/**
+ * A /stats label for a request that names no app, taken from what it carries
+ * anyway: Claude Code's user agent, the zone a calling Worker runs on
+ * (Cloudflare's `cf-worker` header, so every app on one domain shares a
+ * label), or the SDK's language. Most traffic once
+ * landed in one "unknown" bucket, so nobody could see what spent the free
+ * tiers (fortune-llm#53). The "unknown-" start marks it as a guess, and the
+ * result keeps to the stats rule: at most 32 of a-z, 0-9, "-" and "_".
+ */
+export function unlabelledConsumer(headers: Headers): string {
+  const agent = headers.get("user-agent") ?? "";
+  const site = headers.get("cf-worker");
+  const who = /^claude-cli\//i.test(agent)
+    ? "claude-code"
+    : site
+      ? `worker-${site}`
+      : (headers.get("x-stainless-lang") ?? agent.split(/[/\s]/)[0] ?? "");
+  const slug = who
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug ? `unknown-${slug}`.slice(0, 32) : "unknown";
 }
 
 function warnIfCircuitMissing(env: Env): void {
