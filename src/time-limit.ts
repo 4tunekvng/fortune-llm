@@ -54,10 +54,10 @@ const FAST_TIERS: ReadonlySet<BackendKind> = new Set<BackendKind>([
 /** Time kept back from the caller's own timeout for the reply to travel. */
 const CLIENT_MARGIN_MS = 2_000;
 /**
- * What both SDKs send when the app set no timeout: TypeScript's
- * DEFAULT_TIMEOUT and Python's DEFAULT_TIMEOUT are 10 minutes, and both
- * send that for a call without streaming too. An app that sets 600 itself
- * looks the same and gets the chain limit.
+ * What the SDKs send when the app set no timeout: both default to 10
+ * minutes. TypeScript sends "600" for every call; Python sends "600" for
+ * a call without streaming and "NOT_GIVEN" for a stream. An app that sets
+ * 600 itself looks the same and gets the chain limit.
  */
 const SDK_DEFAULT_TIMEOUT_S = 600;
 /** Below this the chain could not reach even one tier. */
@@ -77,9 +77,10 @@ function positiveMs(raw: string | undefined | null): number | undefined {
 
 /**
  * The free tiers' shared budget for one request. The TypeScript SDK sends
- * `X-Stainless-Timeout` as whole seconds ("90"); the Python SDK sends what
- * the app gave ("90", "90.0") or "NOT_GIVEN". Anything that isn't a positive
- * number, and the SDKs' default, is ignored.
+ * `X-Stainless-Timeout` as whole seconds ("90"); the Python SDK sends a
+ * timeout given on the call itself ("90.0") and "NOT_GIVEN" for one set on
+ * the client. Anything that isn't a positive number, and the SDKs'
+ * default, is ignored.
  */
 export function chainBudgetMs(
   envValue: string | undefined,

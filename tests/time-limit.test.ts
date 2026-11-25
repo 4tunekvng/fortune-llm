@@ -261,12 +261,43 @@ describe("fetch handler with a slow tier", () => {
     let settled = false;
     void pending.then(() => (settled = true));
     await vi.advanceTimersByTimeAsync(80_001);
-    const resp = await pending;
+    vi.useRealTimers();
+
+    // Assert: answered by 80 s, before any wait on the reply.
+    expect(settled).toBe(true);
+    expect((await pending).status).toBe(503);
+  });
+
+  it("hands a default-timeout caller to paid at the chain limit", async () => {
+    // Arrange: the SDK's 600 s default; free tiers hang; paid answers.
+    vi.useFakeTimers();
+    const kv = new MapKv();
+    let paidAt: number | undefined;
+    const start = Date.now();
+    const free = hangingFetch();
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      const paid = String(url).startsWith("https://api.anthropic.com");
+      if (!paid) return free(url, init);
+      paidAt = Date.now() - start;
+      return Promise.resolve(Response.json({ type: "message", content: [] }));
+    });
+    const env = makeEnv(kv, {
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      AI: { run: hangingAi },
+    });
+
+    // Act
+    const pending = worker.fetch(
+      messagesRequest({}, { "x-stainless-timeout": "600" }),
+      env as never,
+      ctx as never,
+    );
+    await vi.advanceTimersByTimeAsync(80_001);
     vi.useRealTimers();
 
     // Assert
-    expect(settled).toBe(true);
-    expect(resp.status).toBe(503);
+    expect(paidAt).toBeGreaterThanOrEqual(80_000);
+    expect((await pending).headers.get("x-fortune-llm-route")).toBe("anthropic");
   });
 
   it("does not start paid Anthropic when the caller is about to leave", async () => {
