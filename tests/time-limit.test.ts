@@ -81,7 +81,9 @@ describe("chainBudgetMs", () => {
     const budgets = [
       chainBudgetMs(undefined, "20"), // TypeScript SDK, whole seconds
       chainBudgetMs("80000", "100"), // a caller that chose to wait longer
-      chainBudgetMs(undefined, "600.0"), // Python SDK default
+      chainBudgetMs(undefined, "600"), // either SDK's default: no choice
+      chainBudgetMs("30000", "600.0"), // the same default, as a float
+      chainBudgetMs(undefined, "300.5"), // Python SDK, a chosen float
       chainBudgetMs(undefined, "NOT_GIVEN"), // Python SDK, no timeout set
       chainBudgetMs(undefined, null), // curl or fetch
       chainBudgetMs(undefined, "1"), // nearly out of time
@@ -91,7 +93,8 @@ describe("chainBudgetMs", () => {
 
     // Assert
     expect(budgets).toEqual([
-      18_000, 98_000, 598_000, 80_000, 80_000, 5_000, 30_000, 80_000,
+      18_000, 98_000, 80_000, 30_000, 298_500, 80_000, 80_000, 5_000, 30_000,
+      80_000,
     ]);
   });
 });
@@ -240,6 +243,30 @@ describe("fetch handler with a slow tier", () => {
     // Assert
     expect(resp.status).toBe(503);
     expect((await getCircuitState("groq", kv as never)).open).toBe(false);
+  });
+
+  it("gives a caller on the SDK's default timeout the chain limit", async () => {
+    // Arrange: the SDK's 600 s default; every free tier hangs; 80 s limit.
+    vi.useFakeTimers();
+    const kv = new MapKv();
+    vi.stubGlobal("fetch", hangingFetch());
+    const env = makeEnv(kv, { AI: { run: hangingAi } });
+
+    // Act
+    const pending = worker.fetch(
+      messagesRequest({}, { "x-stainless-timeout": "600" }),
+      env as never,
+      ctx as never,
+    );
+    let settled = false;
+    void pending.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(80_001);
+    const resp = await pending;
+    vi.useRealTimers();
+
+    // Assert
+    expect(settled).toBe(true);
+    expect(resp.status).toBe(503);
   });
 
   it("does not start paid Anthropic when the caller is about to leave", async () => {
