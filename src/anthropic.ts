@@ -82,45 +82,64 @@ export function scrubForAnthropic(rawBody: string): string {
   try {
     const parsed = JSON.parse(rawBody);
     if (!parsed || typeof parsed !== "object") return rawBody;
-    let touched = false;
-    // This hop forwards the raw body, so the cap index.ts applied to its
-    // parsed copy has to be applied here too.
-    if (
-      typeof parsed.max_tokens === "number" &&
-      parsed.max_tokens > MAX_OUTPUT_TOKENS
-    ) {
-      parsed.max_tokens = MAX_OUTPUT_TOKENS;
-      // Anthropic refuses a thinking budget that is not below max_tokens.
-      const budget = parsed.thinking?.budget_tokens;
-      if (typeof budget === "number" && budget >= MAX_OUTPUT_TOKENS) {
-        parsed.thinking.budget_tokens = MAX_OUTPUT_TOKENS - 1;
-      }
-      touched = true;
-    }
-    for (const k of SAMPLING_KEYS) {
-      if (k in parsed) {
-        delete parsed[k];
-        touched = true;
-      }
-    }
-    if (parsed.metadata && typeof parsed.metadata === "object") {
-      let metaTouched = false;
-      for (const k of RESERVED_METADATA_KEYS) {
-        if (k in parsed.metadata) {
-          delete parsed.metadata[k];
-          metaTouched = true;
+    let touched = scrubParams(parsed);
+    // A batch (/v1/messages/batches) carries one request's fields per item,
+    // in `params`, so each gets the same treatment (fortune-llm#51).
+    if (Array.isArray(parsed.requests)) {
+      for (const item of parsed.requests) {
+        if (item?.params && typeof item.params === "object") {
+          touched = scrubParams(item.params) || touched;
         }
       }
-      // If metadata is now empty, drop it entirely — Anthropic accepts no
-      // metadata field, but an empty object is fine too. Either is safe.
-      if (metaTouched && Object.keys(parsed.metadata).length === 0) {
-        delete parsed.metadata;
-      }
-      touched ||= metaTouched;
     }
     return touched ? JSON.stringify(parsed) : rawBody;
   } catch {
     // Not JSON or malformed — forward as-is and let upstream reject it.
     return rawBody;
   }
+}
+
+/**
+ * Caps max_tokens and drops sampling fields and gateway metadata from one
+ * request's fields, in place. Returns whether anything changed.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function scrubParams(params: any): boolean {
+  let touched = false;
+  // This hop forwards the raw body, so the cap index.ts applied to its
+  // parsed copy has to be applied here too.
+  if (
+    typeof params.max_tokens === "number" &&
+    params.max_tokens > MAX_OUTPUT_TOKENS
+  ) {
+    params.max_tokens = MAX_OUTPUT_TOKENS;
+    // Anthropic refuses a thinking budget that is not below max_tokens.
+    const budget = params.thinking?.budget_tokens;
+    if (typeof budget === "number" && budget >= MAX_OUTPUT_TOKENS) {
+      params.thinking.budget_tokens = MAX_OUTPUT_TOKENS - 1;
+    }
+    touched = true;
+  }
+  for (const k of SAMPLING_KEYS) {
+    if (k in params) {
+      delete params[k];
+      touched = true;
+    }
+  }
+  if (params.metadata && typeof params.metadata === "object") {
+    let metaTouched = false;
+    for (const k of RESERVED_METADATA_KEYS) {
+      if (k in params.metadata) {
+        delete params.metadata[k];
+        metaTouched = true;
+      }
+    }
+    // If metadata is now empty, drop it entirely — Anthropic accepts no
+    // metadata field, but an empty object is fine too. Either is safe.
+    if (metaTouched && Object.keys(params.metadata).length === 0) {
+      delete params.metadata;
+    }
+    touched ||= metaTouched;
+  }
+  return touched;
 }

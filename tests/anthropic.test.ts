@@ -133,4 +133,58 @@ describe("scrubForAnthropic", () => {
     const out = JSON.parse(scrubForAnthropic(body));
     expect(out.thinking.budget_tokens).toBe(65535);
   });
+
+  it("caps max_tokens and the thinking budget in every batch item", () => {
+    const body = JSON.stringify({
+      requests: [
+        {
+          custom_id: "a",
+          params: {
+            model: "x",
+            max_tokens: 128000,
+            thinking: { type: "enabled", budget_tokens: 100000 },
+          },
+        },
+        { custom_id: "b", params: { model: "x", max_tokens: 500 } },
+      ],
+    });
+
+    const out = JSON.parse(scrubForAnthropic(body));
+
+    expect(out.requests[0].params.max_tokens).toBe(65536);
+    expect(out.requests[0].params.thinking.budget_tokens).toBe(65535);
+    expect(out.requests[1].params.max_tokens).toBe(500);
+  });
+
+  it("strips sampling fields and gateway metadata from batch items", () => {
+    const body = JSON.stringify({
+      requests: [
+        {
+          custom_id: "a",
+          params: {
+            model: "x",
+            max_tokens: 10,
+            temperature: 0.2,
+            metadata: { fortune_route: "anthropic", user_id: "u" },
+          },
+        },
+      ],
+    });
+
+    const out = JSON.parse(scrubForAnthropic(body));
+
+    expect(out.requests[0].params).toEqual({
+      model: "x",
+      max_tokens: 10,
+      metadata: { user_id: "u" },
+    });
+  });
+
+  it("returns a batch with nothing to change untouched", () => {
+    const body = JSON.stringify({
+      requests: [{ custom_id: "a", params: { model: "x", max_tokens: 10 } }],
+    });
+
+    expect(scrubForAnthropic(body)).toBe(body);
+  });
 });

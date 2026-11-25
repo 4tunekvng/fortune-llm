@@ -767,6 +767,37 @@ describe("fetch handler routing before the chain", () => {
     expect(resp.headers.get("access-control-allow-origin")).toBe("*");
   });
 
+  it("caps max_tokens in each batch item it sends to Anthropic", async () => {
+    const upstream = vi.fn(async (_url: string, _init: RequestInit) =>
+      Response.json({ id: "msgbatch_1" }),
+    );
+    vi.stubGlobal("fetch", upstream);
+    const batch = {
+      requests: [
+        {
+          custom_id: "a",
+          params: { model: "claude-opus-5-5", max_tokens: 128000, messages: [] },
+        },
+      ],
+    };
+
+    await call(
+      "/v1/messages/batches",
+      {
+        method: "POST",
+        headers: { "x-api-key": "gateway-token" },
+        body: JSON.stringify(batch),
+      },
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+    const sent = JSON.parse(String(upstream.mock.calls[0]?.[1]?.body));
+
+    expect(upstream.mock.calls[0]?.[0]).toBe(
+      "https://api.anthropic.com/v1/messages/batches",
+    );
+    expect(sent.requests[0].params.max_tokens).toBe(65536);
+  });
+
   it("answers 502 when the Anthropic forward throws", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
 
