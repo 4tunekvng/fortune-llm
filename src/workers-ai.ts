@@ -285,7 +285,16 @@ export async function callWorkersAi(
   req: AnthropicMessagesRequest,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const input = buildWorkersAiInput(req);
+  // Gemma 4 thinks before it answers unless told not to: on a 6K-token
+  // prompt it wrote about 3,000 characters of hidden reasoning, took 29 s,
+  // and sometimes spent all of max_tokens before a word of the answer.
+  // With thinking off the same question took 1.8 s. Anthropic-style
+  // requests ask for no thinking, so this matches the Gemini tier, which
+  // turns it off on its 2.5 models for the same reason (gemini.ts).
+  const input: WorkersAiChatRequest = {
+    ...buildWorkersAiInput(req),
+    chat_template_kwargs: { enable_thinking: false },
+  };
   const options = signal ? { signal } : undefined;
   const wantsStream = Boolean(input.stream);
   const hasTools = Array.isArray(input.tools) && input.tools.length > 0;

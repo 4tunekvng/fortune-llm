@@ -10,7 +10,8 @@
  *     third of the measured speed, so a long reply is never cut for being
  *     long, while a hung call (gemini hung past 30 s on a 2K-token request
  *     that day) gives way sooner. openrouter
- *     (good replies up to 60 s) and workers-ai (64 s and more) have no own
+ *     (good replies up to 60 s) and workers-ai (up to 21 s with eight at
+ *     once, after thinking went off; 64 s and more before) have no own
  *     limit; they sit last in the chain and only the chain budget bounds
  *     them. Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
  *   - The chain budget shared by all free tiers: the caller's own timeout

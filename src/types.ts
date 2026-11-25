@@ -106,6 +106,8 @@ export interface WorkersAiChatRequest {
     type: "json_schema";
     json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean };
   };
+  /** Options for the model's chat template; Workers AI only (see callWorkersAi). */
+  chat_template_kwargs?: { enable_thinking?: boolean };
 }
 
 /** OpenAI-style vision content block (text or image_url). */

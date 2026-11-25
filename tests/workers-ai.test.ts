@@ -768,3 +768,34 @@ describe("buildWorkersAiInput — message translation edge cases", () => {
     ]);
   });
 });
+
+describe("callWorkersAi thinking", () => {
+  const req: AnthropicMessagesRequest = {
+    model: "m",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hi" }],
+  };
+  const recordingAi = (seen: unknown[]) => ({
+    run: async (_model: string, input: unknown) => {
+      seen.push(input);
+      return { choices: [{ message: { role: "assistant", content: "hello" }, finish_reason: "stop" }] };
+    },
+  });
+
+  it("turns the model's thinking off for a plain reply", async () => {
+    const seen: unknown[] = [];
+
+    await callWorkersAi(recordingAi(seen), "m", req);
+
+    expect(seen[0]).toMatchObject({ chat_template_kwargs: { enable_thinking: false } });
+  });
+
+  it("turns the model's thinking off when tools are declared", async () => {
+    const seen: unknown[] = [];
+    const withTools = { ...req, tools: [{ name: "search", input_schema: { type: "object" } }] };
+
+    await callWorkersAi(recordingAi(seen), "m", withTools);
+
+    expect(seen[0]).toMatchObject({ chat_template_kwargs: { enable_thinking: false } });
+  });
+});
