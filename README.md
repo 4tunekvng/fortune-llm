@@ -70,6 +70,13 @@ ANTHROPIC_API_KEY=<gateway-token>            # not an Anthropic key
 | `openrouter` | `meta-llama/llama-3.3-70b-instruct:free` | Free via `:free` model variants | Text, tool use, vision (some models), long context | Independent quota pool that doesn't share with Cloudflare/Google/Groq. Configurable via `DEFAULT_OPENROUTER_MODEL`. |
 | `anthropic` | Whatever the caller asked for | Paid | Frontier | Last-resort: appended automatically when `ANTHROPIC_API_KEY` is configured; can also be forced via `metadata.fortune_route="anthropic"`. |
 
+Gemma 4 (the `workers-ai` default, and one of `openrouter`'s free models)
+can write an empty thinking block, `<|channel>thought …<channel|>`, into a
+reply even with thinking off; some servers leave only the bare word
+"thought" on the first line. The translators drop it before any consumer
+sees it (`src/ghost-thought.ts`): a closed block from any model, the bare
+word only from Gemma, streamed and whole replies alike.
+
 The whole point of stacking four free tiers is that each one has an
 independent quota pool — exhausting all of them on the same day is rare,
 which means `anthropic` (the only one that bills) is rarely reached even
