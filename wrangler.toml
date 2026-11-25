@@ -66,6 +66,7 @@ binding = "AI"
 #   RATE_LIMIT_PER_MIN       = "200"       # per-IP req/min, default 200, 0 disables
 #   CHAIN_TIME_LIMIT_MS      = "80000"     # all free tiers of one request together
 #   TIER_TIME_LIMIT_MS_GEMINI = "20000"    # one tier's own limit (README "Time limits")
+#   STREAM_IDLE_MS           = "10000"     # quiet gap that cuts a stream
 #
 # A consumer (x-fortune-consumer) gets its own rate-limit bucket only once
 # registered; any other name, and the development token, stay IP-scoped

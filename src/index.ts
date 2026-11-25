@@ -60,6 +60,7 @@ import {
   writeCache,
 } from "./cache.js";
 import { saysSomething, synthesizeAnthropicSSE } from "./sse.js";
+import { holdUntilFirstWords } from "./stream-gate.js";
 import { extractOutputSchema } from "./structured-output.js";
 import { schemaMismatch } from "./schema-check.js";
 import { RequestShapeError } from "./upstream-error.js";
@@ -68,6 +69,7 @@ import {
   callerDeadline,
   chainBudgetMs,
   paidHasTime,
+  streamIdleMs,
   tierLimitMs,
   TierTimeoutError,
   withTimeLimit,
@@ -700,8 +702,22 @@ function invokeTimed(
         parsed.max_tokens,
       );
   const ms = own !== undefined && own < left ? own : left;
+  const upstream = new AbortController();
   return withTimeLimit(
-    (signal) => invokeTier(tier, env, parsed, request, rawBody, signal),
+    async (signal) => {
+      const both = AbortSignal.any([signal, upstream.signal]);
+      const resp = await invokeTier(tier, env, parsed, request, rawBody, both);
+      if (!(resp.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        return resp;
+      }
+      // Held until its first words, so a stream that fails before then
+      // falls through to the next tier like any failed call.
+      return holdUntilFirstWords(resp, tier, {
+        idleMs: streamIdleMs(env as unknown as Record<string, unknown>),
+        signal,
+        stopUpstream: () => upstream.abort(),
+      });
+    },
     ms,
     () => new TierTimeoutError(tier, ms),
   );
@@ -1201,8 +1217,8 @@ async function streamWholeReply(
  * A free model sometimes answers with no text and no tool call. Passed on,
  * that blank reply is cached and, once stored as chat history, makes the
  * Anthropic API reject every later turn. Throwing here moves the chain to
- * the next tier, as the tool-silence check in callWorkersAi does. Streams
- * are left alone: their text is not known until it has been sent.
+ * the next tier, as the tool-silence check in callWorkersAi does. A blank
+ * stream is caught earlier, by holdUntilFirstWords (stream-gate.ts).
  */
 async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void> {
   const type = resp.headers.get("content-type") ?? "";

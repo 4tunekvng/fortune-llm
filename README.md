@@ -117,10 +117,16 @@ abort signal) when the limit runs out, and the chain moves to the next tier.
 | Own limit, slow tiers (openrouter, workers-ai) | none | Good replies took up to 60 s and 64 s; only the chain budget bounds them. |
 | Chain budget, all free tiers together | the caller's timeout less 2 s, else 80 s | The SDK sends each call's timeout in `X-Stainless-Timeout`; the budget ends 2 s before it, so the caller gets an answer before it gives up, and a caller that chose to wait longer (Maestro's 100 s plan call) is not cut short. Without the header, `CHAIN_TIME_LIMIT_MS` (default 80 s). Tiers left when it is spent are not tried. |
 | Paid Anthropic | none | The last resort runs as before, except it is not started with under 15 s left before the caller's own timeout (the reply would be billed and thrown away). |
+| Quiet gap in a free tier's stream, once its first words are out | 10 s | Every measured tier writes continuously once it starts, so a gap as long as the fast tiers' 10 s base is a stall. The stream then ends on an error event and the upstream call is stopped. Override with `STREAM_IDLE_MS`. |
 
-For a stream the limit covers the wait for the response to start; once it
-has started it is never cut. A stream that is read whole first (see
-Limitations) has its limit cover the whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
+A free tier's stream is held until its first words (`src/stream-gate.ts`):
+a non-blank text delta, a tool-call fragment or a tool_use block. Nothing
+goes to the caller before then, so a stream that fails, ends, or finishes
+blank before its first words fails that tier and the chain tries the next,
+as a failed whole reply does; the tier's limit covers this wait. After the
+first words no other tier can take over, so only a quiet gap cuts it. A
+stream that is read whole first (see Limitations) has its limit cover the
+whole reply. A prompt over 100K tokens gets no own tier limit (the speeds
 were measured on prompts under 10K tokens); only the chain budget bounds it.
 
 ## Private callers

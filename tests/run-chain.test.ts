@@ -454,4 +454,38 @@ describe("runChain through the fetch handler", () => {
     expect(resp.headers.get("content-type")).toMatch(/event-stream/);
     expect(await resp.text()).toContain('{\\"a\\":\\"ok\\"}');
   });
+
+  it("answers from the next tier when groq's stream fails early", async () => {
+    // Arrange
+    const sse =
+      'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+      "data: {not json and then the socket closes";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(sse, { headers: { "content-type": "text/event-stream" } }),
+      ),
+    );
+    const workersAiStream = () =>
+      new Response(
+        'data: {"response":"hello from workers ai"}\n\ndata: [DONE]\n\n',
+      ).body;
+    const env = makeEnv(new MapKv(), {
+      CACHE_TTL_SECONDS: "0",
+      AI: { run: async () => workersAiStream() },
+    });
+
+    // Act
+    const resp = await worker.fetch(
+      messagesRequest({ stream: true }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("x-fortune-llm-prior-errors")).toContain("groq");
+    expect(await resp.text()).toContain("hello from workers ai");
+  });
 });
