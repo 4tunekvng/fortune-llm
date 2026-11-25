@@ -34,6 +34,7 @@ import {
   randomId,
   sseEventWriter,
   sseResponse,
+  saysSomething,
   synthesizeAnthropicSSE,
 } from "./sse.js";
 
@@ -673,10 +674,9 @@ export async function callGemini(
   // A blocked prompt comes back with no candidate and so no finish reason.
   // index.ts rejects an empty reply only when it is JSON, and this one may
   // go back as a stream, so reject it here.
-  const said = anthropicShape.content.some(
-    (b) => b.type !== "text" || (b as { text: string }).text.trim() !== "",
-  );
-  if (!said) throw new Error("gemini returned an empty reply");
+  if (!saysSomething(anthropicShape)) {
+    throw new Error("gemini returned an empty reply");
+  }
 
   // Tool-silence detection. Consumers that *must* see tool calls (verified
   // by `metadata.fortune_require_tools=true`) treat a text-only response

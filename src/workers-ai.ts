@@ -37,7 +37,9 @@ import {
   readSseFrames,
   randomId,
   sseEventWriter,
+  saysSomething,
   sseResponse,
+  synthesizeAnthropicSSE,
 } from "./sse.js";
 
 export interface AiBinding {
@@ -319,10 +321,11 @@ export async function callWorkersAi(
       }
     }
 
-    if (wantsStream) {
-      return synthesizeToolStream(raw, req.model || model);
-    }
     const body = workersAiToAnthropicMessage(raw, req.model || model, nonStreamInput);
+    // index.ts rejects an empty reply only when it is JSON, and this one may
+    // go back as a stream, so reject it here.
+    if (!saysSomething(body)) throw new Error("Workers AI returned an empty reply");
+    if (wantsStream) return synthesizeAnthropicSSE(body);
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -384,14 +387,8 @@ export function workersAiToAnthropicMessage(
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   const finishReason = result.choices?.[0]?.finish_reason;
-  let stopReason: AnthropicStopReason;
-  if (validToolCalls.length > 0) {
-    stopReason = "tool_use";
-  } else if (finishReason === "length") {
-    stopReason = "max_tokens";
-  } else {
-    stopReason = "end_turn";
-  }
+  const stopReason = openAIStopReason(finishReason, validToolCalls.length);
+  if (stopReason === null) throw unfinishedReplyError("Workers AI", finishReason);
   const promptTokens = result.usage?.prompt_tokens ?? estimatePromptTokens(input);
   const completionTokens =
     result.usage?.completion_tokens ??
@@ -414,6 +411,41 @@ export function workersAiToAnthropicMessage(
       output_tokens: completionTokens,
     },
   };
+}
+
+// Finish reasons that mean the model ended its reply itself. Any other
+// (content_filter, OpenRouter's error, Mistral's model_length) means the
+// provider cut the reply off.
+const FINISHED_REASONS = new Set(["stop", "length", "tool_calls", "function_call"]);
+
+/**
+ * The Anthropic stop reason for an OpenAI-shaped reply, or null when the
+ * reply did not finish: the provider cut it off, or it promised a tool call
+ * that never came. Shared by every OpenAI-compatible translator, so a cut-off
+ * reply fails the tier instead of reaching the caller as a normal end. A
+ * missing reason still counts as finished (fortune-llm#52).
+ */
+export function openAIStopReason(
+  finishReason: string | null | undefined,
+  toolCallCount: number,
+): AnthropicStopReason | null {
+  if (finishReason && !FINISHED_REASONS.has(finishReason)) return null;
+  // Checked before tool calls: a call cut off mid-arguments is no call.
+  if (finishReason === "length") return "max_tokens";
+  if (toolCallCount > 0) return "tool_use";
+  if (finishReason === "tool_calls" || finishReason === "function_call") return null;
+  return "end_turn";
+}
+
+/** Thrown when a whole reply did not finish, so the chain tries the next tier. */
+export function unfinishedReplyError(
+  label: string,
+  finishReason: string | null | undefined,
+): Error {
+  return new Error(
+    `${label} did not finish its reply (${finishReason ?? "no finish reason"}). ` +
+      "Falling through to next tier.",
+  );
 }
 
 // Builds Anthropic content blocks from an OpenAI-shaped reply's text and
@@ -460,83 +492,6 @@ function estimatePromptTokens(input: WorkersAiChatRequest): number {
   return Math.ceil(chars / 4);
 }
 
-/**
- * Synthesize an Anthropic SSE stream from a fully-buffered Workers AI
- * tool-call response. We emit text deltas (if any) followed by one
- * tool_use content block per tool call, with the full args as a single
- * input_json_delta. Same event vocabulary the SDK expects.
- */
-function synthesizeToolStream(
-  result: WorkersAiChatResponse,
-  modelLabel: string,
-): Response {
-  const messageId = `msg_wa_${randomId()}`;
-  const { text, toolCalls } = extractWorkersAiContent(result);
-
-  const downstream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const writeEvent = sseEventWriter(controller);
-
-      writeEvent(
-        "message_start",
-        messageStartEvent(messageId, modelLabel, result.usage?.prompt_tokens ?? 0),
-      );
-
-      let blockIndex = 0;
-      if (text) {
-        writeEvent("content_block_start", {
-          type: "content_block_start",
-          index: blockIndex,
-          content_block: { type: "text", text: "" },
-        });
-        writeEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: blockIndex,
-          delta: { type: "text_delta", text },
-        });
-        writeEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
-        blockIndex += 1;
-      }
-
-      const validToolCalls = toolCalls.filter((tc) => tc.function);
-      for (const tc of validToolCalls) {
-        writeEvent("content_block_start", {
-          type: "content_block_start",
-          index: blockIndex,
-          content_block: {
-            type: "tool_use",
-            id: tc.id,
-            name: tc.function.name,
-            input: {},
-          },
-        });
-        writeEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: blockIndex,
-          delta: { type: "input_json_delta", partial_json: tc.function.arguments ?? "" },
-        });
-        writeEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
-        blockIndex += 1;
-      }
-
-      writeEvent("message_delta", {
-        type: "message_delta",
-        delta: {
-          stop_reason: validToolCalls.length > 0 ? "tool_use" : "end_turn",
-          stop_sequence: null,
-        },
-        usage: {
-          output_tokens: result.usage?.completion_tokens ?? 0,
-        },
-      });
-      writeEvent("message_stop", { type: "message_stop" });
-      controller.close();
-    },
-  });
-
-  return sseResponse(downstream);
-}
-
 export function streamWorkersAiAsAnthropic(
   upstream: ReadableStream,
   modelLabel: string,
@@ -556,10 +511,12 @@ export function streamWorkersAiAsAnthropic(
 
       let outputTokenCount = 0;
       let streamError = false;
+      let finishReason: string | undefined;
       const processFrame = (frame: string) => {
         const payload = parseSseDataLine(frame);
         if (!payload || payload === "[DONE]") return;
-        const delta = extractWorkersAiDelta(payload);
+        const { text: delta, finishReason: reason } = extractWorkersAiDelta(payload);
+        if (reason) finishReason = reason;
         if (!delta) return;
         outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
         writeEvent("content_block_delta", {
@@ -581,11 +538,22 @@ export function streamWorkersAiAsAnthropic(
           },
         });
       } finally {
-        if (!streamError) {
+        const stopReason = openAIStopReason(finishReason, 0);
+        if (!streamError && stopReason === null) {
+          // Already streaming, so no other tier can take over: end on an
+          // error the caller sees and retries, not on a clean stop.
+          writeEvent("error", {
+            type: "error",
+            error: {
+              type: "api_error",
+              message: `Workers AI did not finish its reply (${finishReason})`,
+            },
+          });
+        } else if (!streamError) {
           writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
           writeEvent("message_delta", {
             type: "message_delta",
-            delta: { stop_reason: "end_turn", stop_sequence: null },
+            delta: { stop_reason: stopReason, stop_sequence: null },
             usage: { output_tokens: outputTokenCount },
           });
           writeEvent("message_stop", { type: "message_stop" });
@@ -603,24 +571,34 @@ export function streamWorkersAiAsAnthropic(
 }
 
 /**
- * The text in one streamed Workers AI frame. Older models send
- * `{"response": "..."}`; newer ones (Gemma 4, the default) send OpenAI-style
- * `{"choices": [{"delta": {"content": "..."}}]}`, the streamed twin of the
- * `choices` shape `WorkersAiChatResponse` already reads. `delta.reasoning` is
- * the model's private thinking and is never passed on as reply text.
+ * The text and finish reason in one streamed Workers AI frame. Older models
+ * send `{"response": "..."}`; newer ones (Gemma 4, the default) send
+ * OpenAI-style `{"choices": [{"delta": {"content": "..."}, "finish_reason"}]}`,
+ * the streamed twin of the `choices` shape `WorkersAiChatResponse` already
+ * reads. `delta.reasoning` is the model's private thinking and is never
+ * passed on as reply text.
  */
-export function extractWorkersAiDelta(jsonPayload: string): string | null {
-  if (!jsonPayload) return null;
+export function extractWorkersAiDelta(jsonPayload: string): {
+  text: string | null;
+  finishReason?: string;
+} {
+  if (!jsonPayload) return { text: null };
   try {
     const obj = JSON.parse(jsonPayload) as {
       response?: unknown;
-      choices?: Array<{ delta?: { content?: unknown } }>;
+      choices?: Array<{
+        delta?: { content?: unknown };
+        finish_reason?: unknown;
+      }>;
     };
-    if (typeof obj.response === "string") return obj.response;
+    const reason = obj.choices?.[0]?.finish_reason;
+    const finishReason = typeof reason === "string" ? reason : undefined;
+    if (typeof obj.response === "string") {
+      return { text: obj.response, finishReason };
+    }
     const content = obj.choices?.[0]?.delta?.content;
-    if (typeof content === "string") return content;
+    return { text: typeof content === "string" ? content : null, finishReason };
   } catch {
-    // ignore
+    return { text: null };
   }
-  return null;
 }

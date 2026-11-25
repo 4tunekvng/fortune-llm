@@ -59,7 +59,7 @@ import {
   resolveCacheTtlSeconds,
   writeCache,
 } from "./cache.js";
-import { synthesizeAnthropicSSE } from "./sse.js";
+import { saysSomething, synthesizeAnthropicSSE } from "./sse.js";
 import { extractOutputSchema } from "./structured-output.js";
 import { schemaMismatch } from "./schema-check.js";
 import { RequestShapeError } from "./upstream-error.js";
@@ -651,6 +651,9 @@ async function runChain(
       }
       statsEvents.push({ kind: "tier_ok", tier });
       flushStats();
+      if (wantsStream && effectiveParsed.stream !== true && isJson200(resp)) {
+        return { ok: true, response: await streamWholeReply(resp, headers) };
+      }
       return {
         ok: true,
         response: new Response(resp.body, {
@@ -1065,8 +1068,13 @@ export default {
     // synthesize SSE back to the consumer. This is the entire reason
     // stream-from-cache works — by canonicalizing on non-stream upstream,
     // one cache entry serves both stream and non-stream callers indefinitely.
-    const effectiveParsed: AnthropicMessagesRequest =
-      cacheEligible && wantsStream ? { ...parsed, stream: false } : parsed;
+    // A structured stream is read whole too, so its reply can be checked
+    // against the schema (rejectOffSchemaReply) before any of it is sent.
+    const structured = extractOutputSchema(parsed) !== null;
+    const readWhole = wantsStream && (cacheEligible || structured);
+    const effectiveParsed: AnthropicMessagesRequest = readWhole
+      ? { ...parsed, stream: false }
+      : parsed;
 
     const chain: RouteChain = decideRoute(parsed, {
       anthropicFallback: !auth.dev && Boolean(env.ANTHROPIC_API_KEY),
@@ -1171,6 +1179,24 @@ function withTierHeaders(
   });
 }
 
+function isJson200(resp: Response): boolean {
+  const type = resp.headers.get("content-type") ?? "";
+  return resp.status === 200 && type.includes("application/json");
+}
+
+/** Streams back a reply that was read whole for checking. */
+async function streamWholeReply(
+  resp: Response,
+  headers: Headers,
+): Promise<Response> {
+  const message = (await resp.json()) as AnthropicMessageResponse;
+  const sse = synthesizeAnthropicSSE(message);
+  const sseHeaders = new Headers(sse.headers);
+  headers.forEach((v, k) => sseHeaders.set(k, v));
+  sseHeaders.set("content-type", "text/event-stream; charset=utf-8");
+  return new Response(sse.body, { status: 200, headers: sseHeaders });
+}
+
 /**
  * A free model sometimes answers with no text and no tool call. Passed on,
  * that blank reply is cached and, once stored as chat history, makes the
@@ -1187,9 +1213,7 @@ async function rejectEmptyReply(tier: BackendKind, resp: Response): Promise<void
   } catch {
     return;
   }
-  const blocks = Array.isArray(msg.content) ? msg.content : [];
-  const said = blocks.some((b) => b.type !== "text" || b.text.trim() !== "");
-  if (!said) throw new Error(`${tier} returned an empty reply`);
+  if (!saysSomething(msg)) throw new Error(`${tier} returned an empty reply`);
 }
 
 /**

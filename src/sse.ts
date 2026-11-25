@@ -130,6 +130,15 @@ export function randomId(): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * Whether a reply has anything in it: a tool call or non-blank text. A blank
+ * one, stored as chat history, makes the Anthropic API reject later turns.
+ */
+export function saysSomething(message: AnthropicMessageResponse): boolean {
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  return blocks.some((b) => b.type !== "text" || b.text.trim() !== "");
+}
+
 export function synthesizeAnthropicSSE(message: AnthropicMessageResponse): Response {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {

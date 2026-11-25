@@ -386,4 +386,72 @@ describe("runChain through the fetch handler", () => {
     expect(resp.status).toBe(200);
     expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
   });
+
+  it("answers from the next tier when groq cuts its reply off", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "Let me" },
+              finish_reason: "content_filter",
+            },
+          ],
+        }),
+      ),
+    );
+    const env = makeEnv(new MapKv(), { CACHE_TTL_SECONDS: "0" });
+
+    // Act
+    const resp = await worker.fetch(messagesRequest(), env as never, ctx as never);
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(await resp.text()).toContain("hello from workers ai");
+  });
+
+  it("checks a structured stream against its schema, then streams it", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "Sure, here you go" },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+      ),
+    );
+    const env = makeEnv(new MapKv(), {
+      CACHE_TTL_SECONDS: "0",
+      AI: { run: async () => ({ response: '{"a":"ok"}' }) },
+    });
+    const schema = {
+      type: "object",
+      properties: { a: { type: "string" } },
+      required: ["a"],
+    };
+
+    // Act
+    const resp = await worker.fetch(
+      messagesRequest({
+        stream: true,
+        output_config: { format: { type: "json_schema", schema } },
+      }),
+      env as never,
+      ctx as never,
+    );
+
+    // Assert
+    expect(resp.headers.get("x-fortune-llm-route")).toBe("workers-ai");
+    expect(resp.headers.get("content-type")).toMatch(/event-stream/);
+    expect(await resp.text()).toContain('{\\"a\\":\\"ok\\"}');
+  });
 });
