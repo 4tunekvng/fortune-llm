@@ -30,6 +30,7 @@ import type {
   WorkersAiContentBlock,
   WorkersAiChatResponse,
 } from "./types.js";
+import { ghostThoughtFilter, stripGhostThought } from "./ghost-thought.js";
 import { extractOutputSchema, outputSchemaToOpenAIResponseFormat } from "./structured-output.js";
 import {
   messageStartEvent,
@@ -331,7 +332,12 @@ export async function callWorkersAi(
       }
     }
 
-    const body = workersAiToAnthropicMessage(raw, req.model || model, nonStreamInput);
+    const body = workersAiToAnthropicMessage(
+      raw,
+      req.model || model,
+      nonStreamInput,
+      model,
+    );
     // index.ts rejects an empty reply only when it is JSON, and this one may
     // go back as a stream, so reject it here.
     if (!saysSomething(body)) throw new Error("Workers AI returned an empty reply");
@@ -350,7 +356,7 @@ export async function callWorkersAi(
     return streamWorkersAiAsAnthropic(raw, model);
   }
   const result = raw as WorkersAiChatResponse;
-  const body = workersAiToAnthropicMessage(result, req.model || model, input);
+  const body = workersAiToAnthropicMessage(result, req.model || model, input, model);
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -390,10 +396,12 @@ export function workersAiToAnthropicMessage(
   result: WorkersAiChatResponse,
   modelLabel: string,
   input: WorkersAiChatRequest,
+  /** The Workers AI model that wrote the reply. */
+  model: string,
 ): AnthropicMessageResponse {
   const { text, toolCalls } = extractWorkersAiContent(result);
 
-  const content = toAnthropicContent(text, toolCalls);
+  const content = toAnthropicContent(text, toolCalls, model);
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   const finishReason = result.choices?.[0]?.finish_reason;
@@ -459,14 +467,17 @@ export function unfinishedReplyError(
 }
 
 // Builds Anthropic content blocks from an OpenAI-shaped reply's text and
-// tool calls, shared by every OpenAI-compatible translator.
+// tool calls, shared by every OpenAI-compatible translator. `model` is the
+// one that wrote the text, which decides what counts as a ghost thought.
 export function toAnthropicContent(
   text: string,
   toolCalls: OpenAIToolCall[],
+  model: string,
 ): AnthropicResponseContentBlock[] {
   const content: AnthropicResponseContentBlock[] = [];
-  if (text) {
-    content.push({ type: "text", text });
+  const shown = stripGhostThought(text, model);
+  if (shown) {
+    content.push({ type: "text", text: shown });
   }
   for (const tc of toolCalls) {
     // Guard against malformed upstream responses where `function` is absent.
@@ -521,6 +532,15 @@ export function streamWorkersAiAsAnthropic(
 
       let outputTokenCount = 0;
       let streamError = false;
+      const ghost = ghostThoughtFilter(modelLabel);
+      const writeText = (text: string) => {
+        if (!text) return;
+        writeEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text },
+        });
+      };
       let finishReason: string | undefined;
       // A stream that ends with neither [DONE] nor a finish reason was cut.
       let sawDone = false;
@@ -532,11 +552,7 @@ export function streamWorkersAiAsAnthropic(
         if (reason) finishReason = reason;
         if (!delta) return;
         outputTokenCount += Math.max(1, Math.ceil(delta.length / 4));
-        writeEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: 0,
-          delta: { type: "text_delta", text: delta },
-        });
+        writeText(ghost.push(delta));
       };
       try {
         await readSseFrames(upstream, (frame) => {
@@ -569,6 +585,7 @@ export function streamWorkersAiAsAnthropic(
             },
           });
         } else if (!streamError) {
+          writeText(ghost.flush());
           writeEvent("content_block_stop", { type: "content_block_stop", index: 0 });
           writeEvent("message_delta", {
             type: "message_delta",

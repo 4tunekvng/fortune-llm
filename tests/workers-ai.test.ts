@@ -11,6 +11,9 @@ import {
 } from "../src/workers-ai.js";
 import type { AnthropicMessagesRequest } from "../src/types.js";
 
+const WA_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const WA_GEMMA = "@cf/google/gemma-4-26b-a4b-it";
+
 describe("flattenContent", () => {
   it("returns string content unchanged", () => {
     expect(flattenContent("hello")).toBe("hello");
@@ -231,6 +234,7 @@ describe("workersAiToAnthropicMessage", () => {
       { response: "hello world", usage: { prompt_tokens: 5, completion_tokens: 2 } },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.type).toBe("message");
     expect(msg.role).toBe("assistant");
@@ -255,6 +259,7 @@ describe("workersAiToAnthropicMessage", () => {
       },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.stop_reason).toBe("tool_use");
     expect(msg.content).toEqual([
@@ -274,6 +279,7 @@ describe("workersAiToAnthropicMessage", () => {
       },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "call" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.content).toEqual([
       { type: "tool_use", id: "call_str", name: "f", input: {} },
@@ -287,6 +293,7 @@ describe("workersAiToAnthropicMessage", () => {
       { response: "abcd".repeat(10) },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "x".repeat(20) }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.usage.input_tokens).toBeGreaterThan(0);
     expect(msg.usage.output_tokens).toBe(10);
@@ -297,6 +304,7 @@ describe("workersAiToAnthropicMessage", () => {
       {},
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.content).toHaveLength(1);
     expect(msg.content[0]).toEqual({ type: "text", text: "" });
@@ -317,6 +325,7 @@ describe("workersAiToAnthropicMessage", () => {
       },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.content).toEqual([{ type: "text", text: "hello from gemma" }]);
     expect(msg.stop_reason).toBe("end_turn");
@@ -346,6 +355,7 @@ describe("workersAiToAnthropicMessage", () => {
       },
       "claude-sonnet-5",
       { messages: [{ role: "user", content: "weather in Tokyo?" }], max_tokens: 100 },
+      WA_MODEL,
     );
     expect(msg.stop_reason).toBe("tool_use");
     expect(msg.content).toEqual([
@@ -368,7 +378,7 @@ describe("workersAiToAnthropicMessage on a reply the model did not finish", () =
   it("throws on an unknown finish reason so the next tier answers", () => {
     const result = replyEnding("half", "content_filter");
 
-    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(
+    expect(() => workersAiToAnthropicMessage(result, "m", input, WA_MODEL)).toThrow(
       /Workers AI did not finish its reply \(content_filter\)/,
     );
   });
@@ -376,7 +386,7 @@ describe("workersAiToAnthropicMessage on a reply the model did not finish", () =
   it("throws when it promised a tool call and sent none", () => {
     const result = replyEnding("", "tool_calls");
 
-    expect(() => workersAiToAnthropicMessage(result, "m", input)).toThrow(
+    expect(() => workersAiToAnthropicMessage(result, "m", input, WA_MODEL)).toThrow(
       /did not finish/,
     );
   });
@@ -405,6 +415,36 @@ describe("callWorkersAi with tools", () => {
     const ai = aiReturning(replyEnding("", "stop"));
 
     await expect(callWorkersAi(ai, "m", toolReq)).rejects.toThrow(/empty reply/);
+  });
+
+  it("drops Gemma 4's ghost thought line before a tool call", async () => {
+    const ai = aiReturning({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "thought\nDrafting it now.",
+          tool_calls: [{
+            id: "c1",
+            type: "function",
+            function: { name: "search", arguments: "{}" },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    });
+
+    const text = await (await callWorkersAi(ai, WA_GEMMA, toolReq)).text();
+
+    expect(text).toContain('"text":"Drafting it now."');
+    expect(text).not.toContain("thought");
+  });
+
+  it("falls through when the reply is only the ghost thought line", async () => {
+    const ai = aiReturning(replyEnding("thought\n", "stop"));
+
+    const reply = callWorkersAi(ai, WA_GEMMA, toolReq);
+
+    await expect(reply).rejects.toThrow(/empty reply/);
   });
 
   it("streams a finished tool call back as tool_use", async () => {
@@ -569,6 +609,34 @@ describe("streamWorkersAiAsAnthropic", () => {
     expect(text.match(/event: content_block_delta/g)).toHaveLength(1);
     expect(text).toContain('"text":"Hello there"');
     expect(text).not.toContain("Goal");
+  });
+
+  it("drops the ghost thought line Gemma 4 can open a stream with", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"thought"}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"content":"\\nHello"}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"content":" there"},' +
+        '"finish_reason":"stop"}]}\n\n',
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, WA_GEMMA).text();
+
+    expect(text).toContain('"text":"Hello"');
+    expect(text).toContain('"text":" there"');
+    expect(text).not.toContain("thought");
+  });
+
+  it("sends a held opening once the stream ends", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"thou"},' +
+        '"finish_reason":"stop"}]}\n\n',
+    ]);
+
+    const text = await streamWorkersAiAsAnthropic(upstream, WA_GEMMA).text();
+
+    expect(text).toContain('"text":"thou"');
+    const stopAt = text.indexOf("content_block_stop");
+    expect(text.indexOf('"text":"thou"')).toBeLessThan(stopAt);
   });
 
   it("ends on an error when a Gemma 4 stream is cut off", async () => {

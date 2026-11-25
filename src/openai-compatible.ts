@@ -33,6 +33,7 @@ import {
   toAnthropicContent,
   unfinishedReplyError,
 } from "./workers-ai.js";
+import { ghostThoughtFilter, type GhostThoughtFilter } from "./ghost-thought.js";
 import { UpstreamError } from "./upstream-error.js";
 import {
   messageStartEvent,
@@ -82,6 +83,8 @@ interface OpenAIChoice {
 
 interface OpenAIChatResponse {
   id?: string;
+  /** The model that wrote the reply (OpenRouter names the fallback it used). */
+  model?: string;
   choices?: OpenAIChoice[];
   usage?: {
     prompt_tokens?: number;
@@ -104,6 +107,7 @@ interface OpenAIStreamDelta {
 
 interface OpenAIStreamChunk {
   id?: string;
+  model?: string;
   choices?: Array<{
     index?: number;
     delta?: OpenAIStreamDelta;
@@ -169,7 +173,12 @@ export async function callOpenAICompatible(
     if (!upstream.body) {
       throw new Error(`${config.label} stream had no body`);
     }
-    return streamOpenAIAsAnthropic(upstream.body, req.model || config.model, config.label);
+    return streamOpenAIAsAnthropic(
+      upstream.body,
+      req.model || config.model,
+      config.label,
+      config.model,
+    );
   }
 
   const parsed = (await upstream.json()) as OpenAIChatResponse;
@@ -180,6 +189,7 @@ export async function callOpenAICompatible(
     parsed,
     req.model || config.model,
     config.label,
+    config.model,
   );
 
   // Tool-silence detection. Matches the same opt-in semantics workers-ai
@@ -212,13 +222,15 @@ export function openAIToAnthropicMessage(
   resp: OpenAIChatResponse,
   modelLabel: string,
   providerLabel: string,
+  /** The provider's model asked for; the reply's own `model` wins. */
+  requestedModel: string,
 ): AnthropicMessageResponse {
   const choice = resp.choices?.[0];
   const msg = choice?.message;
   const text = typeof msg?.content === "string" ? msg.content : "";
   const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
 
-  const content = toAnthropicContent(text, toolCalls);
+  const content = toAnthropicContent(text, toolCalls, resp.model ?? requestedModel);
 
   const validToolCalls = toolCalls.filter((tc) => tc.function);
   const stopReason = openAIStopReason(choice?.finish_reason, validToolCalls.length);
@@ -254,6 +266,8 @@ export function streamOpenAIAsAnthropic(
   upstream: ReadableStream<Uint8Array>,
   modelLabel: string,
   providerLabel: string,
+  /** The provider's model asked for; a chunk's own `model` wins. */
+  requestedModel: string,
 ): Response {
   const messageId = `msg_oai_${randomId()}`;
 
@@ -286,6 +300,9 @@ export function streamOpenAIAsAnthropic(
         argsBuf: string;
       }
       const toolByIndex = new Map<number, ToolCallState>();
+      // Made at the first reply text, for the model the chunks name.
+      let servedModel = requestedModel;
+      let ghost: GhostThoughtFilter | null = null;
 
       const openTextBlock = () => {
         if (textBlockIndex !== null) return;
@@ -297,7 +314,18 @@ export function streamOpenAIAsAnthropic(
         });
       };
 
+      const writeText = (text: string) => {
+        if (!text) return;
+        openTextBlock();
+        writeEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: textBlockIndex as number,
+          delta: { type: "text_delta", text },
+        });
+      };
+
       const closeTextBlock = () => {
+        if (ghost) writeText(ghost.flush());
         if (textBlockIndex === null) return;
         writeEvent("content_block_stop", { type: "content_block_stop", index: textBlockIndex });
         textBlockIndex = null;
@@ -395,6 +423,7 @@ export function streamOpenAIAsAnthropic(
         } catch {
           return;
         }
+        if (parsed.model) servedModel = parsed.model;
 
         // Some providers (OpenRouter) emit usage on the final chunk in a
         // top-level `usage` field; others put it on a separate trailing
@@ -412,15 +441,9 @@ export function streamOpenAIAsAnthropic(
         if (!delta) return;
 
         if (typeof delta.content === "string" && delta.content.length > 0) {
-          openTextBlock();
-          // textBlockIndex is non-null after openTextBlock.
-          const idx = textBlockIndex as number;
           outputTokens += Math.max(1, Math.ceil(delta.content.length / 4));
-          writeEvent("content_block_delta", {
-            type: "content_block_delta",
-            index: idx,
-            delta: { type: "text_delta", text: delta.content },
-          });
+          ghost ??= ghostThoughtFilter(servedModel);
+          writeText(ghost.push(delta.content));
         }
 
         if (Array.isArray(delta.tool_calls)) {
