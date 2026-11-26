@@ -29,6 +29,7 @@ describe("openAIToAnthropicMessage", () => {
       },
       "llama-3.3-70b-versatile",
       "Groq",
+      "m",
     );
     expect(out.content).toEqual([{ type: "text", text: "hello there" }]);
     expect(out.stop_reason).toBe("end_turn");
@@ -60,6 +61,7 @@ describe("openAIToAnthropicMessage", () => {
       },
       "llama-3.3-70b-versatile",
       "Groq",
+      "m",
     );
     expect(out.stop_reason).toBe("tool_use");
     expect(out.content).toEqual([
@@ -72,6 +74,7 @@ describe("openAIToAnthropicMessage", () => {
       { choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] },
       "llama-3.3-70b-versatile",
       "Groq",
+      "m",
     );
     expect(out.content).toEqual([{ type: "text", text: "" }]);
   });
@@ -81,6 +84,7 @@ describe("openAIToAnthropicMessage", () => {
       { choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "length" }] },
       "test",
       "Groq",
+      "m",
     );
     expect(out.stop_reason).toBe("max_tokens");
   });
@@ -104,12 +108,69 @@ describe("openAIToAnthropicMessage", () => {
       },
       "test",
       "Groq",
+      "m",
     );
     expect(out.content).toEqual([
       { type: "text", text: "Let me check." },
       { type: "tool_use", id: "t1", name: "search", input: {} },
     ]);
     expect(out.stop_reason).toBe("tool_use");
+  });
+});
+
+describe("openAIToAnthropicMessage on a Gemma 4 ghost thought line", () => {
+  it("drops the bare word Gemma 4 can open a reply with", () => {
+    const out = openAIToAnthropicMessage(
+      {
+        model: "google/gemma-4-31b-it:free",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "thought\nBrunch on Sunday?" },
+          finish_reason: "stop",
+        }],
+      },
+      "claude-sonnet-4-6",
+      "OpenRouter",
+      "m",
+    );
+
+    expect(out.content).toEqual([{ type: "text", text: "Brunch on Sunday?" }]);
+  });
+
+  it("falls back to the model asked for when the reply names none", () => {
+    const out = openAIToAnthropicMessage(
+      {
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "thought\nBrunch?" },
+          finish_reason: "stop",
+        }],
+      },
+      "claude-sonnet-4-6",
+      "OpenRouter",
+      "google/gemma-4-31b-it:free",
+    );
+
+    expect(out.content).toEqual([{ type: "text", text: "Brunch?" }]);
+  });
+
+  it("keeps a first line saying thought from a model that is not Gemma", () => {
+    const out = openAIToAnthropicMessage(
+      {
+        model: "openai/gpt-oss-120b",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "thought\nbrought\ncaught" },
+          finish_reason: "stop",
+        }],
+      },
+      "claude-sonnet-4-6",
+      "Groq",
+      "m",
+    );
+
+    const text = "thought\nbrought\ncaught";
+    expect(out.content).toEqual([{ type: "text", text }]);
   });
 });
 
@@ -127,7 +188,7 @@ describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
   it("throws when the provider filtered the reply", () => {
     const resp = replyEnding("Let me", "content_filter");
 
-    expect(() => openAIToAnthropicMessage(resp, "m", "OpenRouter")).toThrow(
+    expect(() => openAIToAnthropicMessage(resp, "m", "OpenRouter", "m")).toThrow(
       /OpenRouter did not finish its reply \(content_filter\)/,
     );
   });
@@ -135,7 +196,7 @@ describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
   it("throws when it promised a tool call and sent none", () => {
     const resp = replyEnding("", "tool_calls");
 
-    expect(() => openAIToAnthropicMessage(resp, "m", "Groq")).toThrow(
+    expect(() => openAIToAnthropicMessage(resp, "m", "Groq", "m")).toThrow(
       /did not finish/,
     );
   });
@@ -161,7 +222,7 @@ describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
       ],
     };
 
-    const out = openAIToAnthropicMessage(resp, "m", "Groq");
+    const out = openAIToAnthropicMessage(resp, "m", "Groq", "m");
 
     expect(out.stop_reason).toBe("max_tokens");
   });
@@ -173,7 +234,7 @@ describe("openAIToAnthropicMessage on a reply the provider cut off", () => {
       ],
     };
 
-    const out = openAIToAnthropicMessage(resp, "m", "Groq");
+    const out = openAIToAnthropicMessage(resp, "m", "Groq", "m");
 
     expect(out.stop_reason).toBe("end_turn");
   });
@@ -457,7 +518,8 @@ describe("streamOpenAIAsAnthropic", () => {
       "data: [DONE]",
     ]);
 
-    const text = await streamOpenAIAsAnthropic(upstream, "m", "Cerebras").text();
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "Cerebras", "m");
+    const text = await reply.text();
 
     expect(text).toContain("event: error");
     expect(text).toContain("Cerebras did not finish its reply (content_filter)");
@@ -469,10 +531,92 @@ describe("streamOpenAIAsAnthropic", () => {
       'data: {"choices":[{"index":0,"delta":{"content":"Let me"}}]}',
     ]);
 
-    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "Groq", "m");
+    const text = await reply.text();
 
     expect(text).toContain("Groq did not finish its reply (stream cut off)");
     expect(text).not.toContain("message_stop");
+  });
+
+  it("drops the ghost thought line Gemma 4 can open a stream with", async () => {
+    const upstream = upstreamOf([
+      'data: {"model":"google/gemma-4-31b-it:free",' +
+        '"choices":[{"index":0,"delta":{"content":"thought\\n"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"Brunch?"},' +
+        '"finish_reason":"stop"}]}',
+    ]);
+
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "OpenRouter", "m");
+    const text = await reply.text();
+
+    expect(text).toContain('"text":"Brunch?"');
+    expect(text).not.toContain("thought");
+    expect(text.match(/event: content_block_start/g)).toHaveLength(1);
+  });
+
+  it("drops a ghost block Gemma 4 writes just before a tool call", async () => {
+    // Pieces as Gemma 4 31B sent them through OpenRouter in a Lena eval.
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":' +
+        '{"content":"I need a few details:\\n\\n"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"<|channel>thought\\n"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"<channel|>"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1",' +
+        '"function":{"name":"search","arguments":"{}"}}]},' +
+        '"finish_reason":"tool_calls"}]}',
+    ]);
+
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "OpenRouter", "m");
+    const text = await reply.text();
+
+    expect(text).toContain('"text":"I need a few details:\\n\\n"');
+    expect(text).not.toContain("channel");
+    expect(text).toContain('"type":"tool_use"');
+  });
+
+  it("drops the word from a stream whose chunks name no model", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"content":"thought\\nBrunch?"},' +
+        '"finish_reason":"stop"}]}',
+    ]);
+    const gemma = "google/gemma-4-31b-it:free";
+
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "OpenRouter", gemma);
+    const text = await reply.text();
+
+    expect(text).toContain('"text":"Brunch?"');
+    expect(text).not.toContain("thought");
+  });
+
+  it("sends held words before a tool call that follows them", async () => {
+    const upstream = upstreamOf([
+      'data: {"model":"google/gemma-4-31b-it:free",' +
+        '"choices":[{"index":0,"delta":{"content":"thou"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1",' +
+        '"function":{"name":"search","arguments":"{}"}}]},' +
+        '"finish_reason":"tool_calls"}]}',
+    ]);
+
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "OpenRouter", "m");
+    const text = await reply.text();
+
+    expect(text).toContain('"text":"thou"');
+    const toolAt = text.indexOf('"type":"tool_use"');
+    expect(text.indexOf('"text":"thou"')).toBeLessThan(toolAt);
+  });
+
+  it("opens no text block when the reply is only a tool call", async () => {
+    const upstream = upstreamOf([
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1",' +
+        '"function":{"name":"search","arguments":"{}"}}]},' +
+        '"finish_reason":"tool_calls"}]}',
+    ]);
+
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "OpenRouter", "m");
+    const text = await reply.text();
+
+    expect(text.match(/event: content_block_start/g)).toHaveLength(1);
+    expect(text).toContain('"type":"tool_use"');
   });
 
   it("sends a ping while the provider streams only reasoning", async () => {
@@ -491,7 +635,8 @@ describe("streamOpenAIAsAnthropic", () => {
       },
     });
 
-    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "Groq", "m");
+    const text = await reply.text();
     vi.useRealTimers();
 
     expect(text).toContain("event: ping");
@@ -505,7 +650,8 @@ describe("streamOpenAIAsAnthropic", () => {
       "data: [DONE]",
     ]);
 
-    const text = await streamOpenAIAsAnthropic(upstream, "m", "Groq").text();
+    const reply = streamOpenAIAsAnthropic(upstream, "m", "Groq", "m");
+    const text = await reply.text();
 
     expect(text).toContain("event: error");
     expect(text).not.toContain('"stop_reason":"tool_use"');
@@ -531,7 +677,7 @@ describe("streamOpenAIAsAnthropic", () => {
         controller.close();
       },
     });
-    const resp = streamOpenAIAsAnthropic(stream, "llama-3.3-70b", "Groq");
+    const resp = streamOpenAIAsAnthropic(stream, "llama-3.3-70b", "Groq", "m");
     const text = await resp.text();
 
     // The tool_use block should be opened once with id+name, and the
@@ -557,7 +703,7 @@ describe("streamOpenAIAsAnthropic", () => {
         controller.close();
       },
     });
-    const resp = streamOpenAIAsAnthropic(stream, "test", "test");
+    const resp = streamOpenAIAsAnthropic(stream, "test", "test", "m");
     const text = await resp.text();
     expect(text).toContain('"text":"hello"');
     expect(text).toContain('"text":" world"');
@@ -570,7 +716,7 @@ describe("streamOpenAIAsAnthropic", () => {
       "data: [DONE]\r\n\r\n";
     const stream = new Response(body).body as ReadableStream<Uint8Array>;
 
-    const text = await streamOpenAIAsAnthropic(stream, "test", "test").text();
+    const text = await streamOpenAIAsAnthropic(stream, "test", "test", "m").text();
 
     expect(text).toContain('"text":"hello"');
     expect(text).toContain('"text":" world"');

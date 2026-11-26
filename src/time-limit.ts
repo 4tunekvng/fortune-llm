@@ -15,11 +15,12 @@
  *     limit; they sit last in the chain and only the chain budget bounds
  *     them. Override per tier with `TIER_TIME_LIMIT_MS_<TIER>`.
  *   - The chain budget shared by all free tiers: the caller's own timeout
- *     less 2 s when the SDK sends it in `X-Stainless-Timeout`, so the caller
- *     gets an answer before it hangs up and a caller that chose to wait
- *     longer (Maestro gives a plan 100 s) is not cut short; otherwise
+ *     less 2 s when the SDK sends one the app chose in `X-Stainless-Timeout`,
+ *     so the caller gets an answer before it hangs up and a caller that chose
+ *     to wait longer (Maestro gives a plan 100 s) is not cut short; otherwise
  *     `CHAIN_TIME_LIMIT_MS` (default 80 s, under Knox's 90 s and Leggo's
- *     100 s deadlines).
+ *     100 s deadlines). Both SDKs send their own default, 600 s, when the app
+ *     set none, so 600 counts as no choice (fortune-llm#45).
  *
  * Paid Anthropic gets neither: it is the last resort and runs as before,
  * except that it is not started when the caller has told us it will hang
@@ -52,6 +53,13 @@ const FAST_TIERS: ReadonlySet<BackendKind> = new Set<BackendKind>([
 ]);
 /** Time kept back from the caller's own timeout for the reply to travel. */
 const CLIENT_MARGIN_MS = 2_000;
+/**
+ * What the SDKs send when the app set no timeout: both default to 10
+ * minutes. TypeScript sends "600" for every call; Python sends "600" for
+ * a call without streaming and "NOT_GIVEN" for a stream. An app that sets
+ * 600 itself looks the same and gets the chain limit.
+ */
+const SDK_DEFAULT_TIMEOUT_S = 600;
 /** Below this the chain could not reach even one tier. */
 const MIN_BUDGET_MS = 5_000;
 /**
@@ -70,15 +78,16 @@ function positiveMs(raw: string | undefined | null): number | undefined {
 /**
  * The free tiers' shared budget for one request. The TypeScript SDK sends
  * `X-Stainless-Timeout` as whole seconds ("90"); the Python SDK sends a
- * float ("600.0") or "NOT_GIVEN". Anything that isn't a positive number is
- * ignored.
+ * timeout given on the call itself ("90.0") and "NOT_GIVEN" for one set on
+ * the client. Anything that isn't a positive number, and the SDKs'
+ * default, is ignored.
  */
 export function chainBudgetMs(
   envValue: string | undefined,
   stainlessTimeout: string | null,
 ): number {
   const clientSeconds = positiveMs(stainlessTimeout);
-  if (clientSeconds === undefined) {
+  if (clientSeconds === undefined || clientSeconds === SDK_DEFAULT_TIMEOUT_S) {
     return positiveMs(envValue) ?? DEFAULT_CHAIN_TIME_LIMIT_MS;
   }
   return Math.max(MIN_BUDGET_MS, clientSeconds * 1000 - CLIENT_MARGIN_MS);
